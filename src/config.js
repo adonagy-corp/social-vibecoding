@@ -333,6 +333,33 @@ function load() {
     // shrink them in prod to fit more concurrent warm workers on one box.
     workerMemory: process.env.WORKER_MEMORY || '2g',
     workerCpus: process.env.WORKER_CPUS || '2',
+    // Runtime selection is explicit and intentionally defaults to the
+    // existing single-server Docker implementation. Kubernetes never
+    // silently falls back to Docker: an incomplete cluster configuration
+    // fails the requested operation instead of mutating a different host.
+    appRuntime: process.env.APP_RUNTIME || 'docker',
+    workerRuntime: process.env.WORKER_RUNTIME || process.env.APP_RUNTIME || 'docker',
+    captureRuntime: process.env.CAPTURE_RUNTIME || process.env.APP_RUNTIME || 'docker',
+    kubernetes: {
+      buildNamespace: process.env.BUILD_NAMESPACE || 'social-builds',
+      appNamespace: process.env.APP_NAMESPACE || 'social-apps',
+      workerNamespace: process.env.WORKER_NAMESPACE || 'social-workers',
+      buildServiceAccount: process.env.BUILD_SERVICE_ACCOUNT || 'social-kpack-builder',
+      generatedAppServiceAccount: process.env.GENERATED_APP_SERVICE_ACCOUNT || 'social-generated-app',
+      workerServiceAccount: process.env.WORKER_SERVICE_ACCOUNT || 'social-worker',
+      repositoryPrefix: (process.env.REGISTRY_REPOSITORY_PREFIX || '').replace(/\/$/, ''),
+      cacheRepositoryPrefix: (process.env.CACHE_REPOSITORY_PREFIX || '').replace(/\/$/, ''),
+      builderImage: process.env.BUILDER_IMAGE || '',
+      nodeVersion: process.env.BP_NODE_VERSION || '22.*',
+      activeDeadlineSeconds: parseInt(process.env.ACTIVE_DEADLINE_SECONDS || '1800', 10),
+      ingressClassName: process.env.INGRESS_CLASS_NAME || 'cilium',
+      clusterIssuer: process.env.CLUSTER_ISSUER || 'letsencrypt-public',
+      appDomain: process.env.USERNODE_DOMAIN || 'apps.example.invalid',
+      workerImage: process.env.KUBERNETES_WORKER_IMAGE || '',
+      captureImage: process.env.KUBERNETES_CAPTURE_IMAGE || '',
+      workerStorageClass: process.env.WORKER_STORAGE_CLASS || '',
+      workerStorageSize: process.env.WORKER_STORAGE_SIZE || '5Gi',
+    },
     // Postgres connection pool size (pg `Pool.max`). pg's built-in default
     // is 10, which can bottleneck under many concurrent SSE turns + staging
     // DB work. Tunable via env so prod can widen it without a code change.
@@ -514,6 +541,17 @@ function load() {
     })(),
   };
 
+  for (const [name, value] of [
+    ['APP_RUNTIME', config.appRuntime],
+    ['WORKER_RUNTIME', config.workerRuntime],
+    ['CAPTURE_RUNTIME', config.captureRuntime],
+  ]) {
+    if (!['docker', 'kubernetes'].includes(value)) {
+      console.error(`[config] ${name} must be either "docker" or "kubernetes" (received ${JSON.stringify(value)})`);
+      process.exit(1);
+    }
+  }
+
   console.log('[config] Loaded:');
   console.log(`  NODE_ENV=${config.env}`);
   console.log(`  DATABASE_URL=${mask(config.databaseUrl)}`);
@@ -571,6 +609,7 @@ function load() {
     console.log(`  [warn] MAX_ADMIN_USER_PROMOTED_SESSIONS (${config.maxAdminUserPromotedSessions}) is below MAX_USER_PROMOTED_SESSIONS (${config.maxUserPromotedSessions}) — admins get a LOWER proposal cap than regular users`);
   }
   console.log(`  WORKER_MEMORY=${config.workerMemory} WORKER_CPUS=${config.workerCpus}`);
+  console.log(`  APP_RUNTIME=${config.appRuntime} WORKER_RUNTIME=${config.workerRuntime} CAPTURE_RUNTIME=${config.captureRuntime}`);
   console.log(`  DB_POOL_MAX=${config.dbPoolMax}`);
   console.log(`  SESSION_AUTOPAUSE_IDLE_MS=${config.sessionAutopauseIdleMs}${config.sessionAutopauseIdleMs === 0 ? ' (disabled)' : ''}`);
   console.log(`  STAGING_IDLE_TEARDOWN_MS=${config.stagingIdleTeardownMs}${config.stagingIdleTeardownMs === 0 ? ' (disabled)' : ''}`);

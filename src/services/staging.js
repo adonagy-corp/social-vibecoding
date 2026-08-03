@@ -1,5 +1,6 @@
 const log = require('./logger');
 const docker = require('./docker');
+const applicationRuntime = require('./application-runtime');
 const caddy = require('./caddy');
 const dbManager = require('./db-manager');
 const github = require('./github');
@@ -301,14 +302,24 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
       );
     }
 
-    // 3. Build Docker image
     const imageBuildStartedAt = Date.now();
     // Everything up to here — the shallow clone, its submodules, and the
     // manifest/secrets gating — was the one leg of the build half with no
     // phase of its own. It showed up in the trace only as the gap before the
     // first step, which is precisely where an unexplained regression hides.
     timings.sourceFetchMs = imageBuildStartedAt - buildStartedAt;
-    await docker.buildImage(cloneDir, imageName);
+    const { stdout: revisionOut } = await docker.execFileAsync('git', [
+      '-C', cloneDir, 'rev-parse', 'HEAD',
+    ], { timeout: 5000 });
+    const resolvedRevision = (revisionOut || '').trim();
+    const build = await applicationRuntime.build(config, {
+      app,
+      revision: resolvedRevision,
+      environment: 'staging',
+      sessionId: session.id,
+      sourceDir: cloneDir,
+      dockerImage: imageName,
+    });
     timings.imageBuildMs = Date.now() - imageBuildStartedAt;
     await docker.execFileAsync('rm', ['-rf', cloneDir]).catch(() => {});
 
@@ -328,21 +339,23 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
     // 4. Stop existing staging container if any. Short grace: a preview
     // being replaced has nothing worth draining (#767).
     //
-    // Best-effort by design, unlike teardownStaging: this container's name is
-    // deterministic and runContainer below force-removes a surviving
-    // name-collision and retries (docker.js), so a failure here self-heals.
-    // But it is no longer SILENT (#851) — a container that resists removal
-    // here is the same condition that leaked ten production previews, and
-    // finding it in the logs is how you notice a host with a stuck overlay.
-    if (session.staging_container_id) {
-      const stopped = await docker.stopAndRemove(session.staging_container_id, {
+    // Best-effort by design, unlike teardownStaging: the runtime name is
+    // deterministic and the deploy below reconciles it. But it is no longer
+    // SILENT (#851) — a resource that resists removal is still worth surfacing.
+    if (session.staging_runtime_name || session.staging_container_id) {
+      const runtimeName = session.staging_runtime_name || session.staging_container_id;
+      const stopped = await applicationRuntime.remove(config, {
+        runtimeKind: session.staging_runtime_kind || 'docker',
+        runtimeName,
+      }, {
         stopTimeoutSec: docker.STAGING_STOP_GRACE_SEC,
-      }).catch((err) => ({ removed: false, error: err.message })) || {};
+      }).then((result) => result || { removed: true })
+        .catch((err) => ({ removed: false, error: err.message }));
       // Only an EXPLICIT false is a failure — see teardownStaging below for
       // why the absence of the flag is not treated as one.
       if (stopped.removed === false) {
-        log.warn('staging', 'Previous preview container did not remove; relying on run-time name reclaim', {
-          sessionId: session.id, containerId: session.staging_container_id, err: stopped.error || null,
+        log.warn('staging', 'Previous preview runtime did not remove; relying on deploy-time reconciliation', {
+          sessionId: session.id, runtimeName, err: stopped.error || null,
         });
       }
     }
@@ -358,16 +371,9 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
     //   - DOCKER_NETWORK: only consumed by docker.js / worker.js when
     //     spawning containers, which staging cannot do anyway (no Docker
     //     socket mount, Phase 2g). Forwarding adds nothing.
-    //   - DB_CONTAINER: consumed by db-manager.js to build postgres
-    //     `connectionString` URLs. The staging container's own pool uses
-    //     DATABASE_URL (set explicitly above) and doesn't need this.
-    //     Leaving it unset means db-manager falls back to a stale default
-    //     ('project-usernode-db') that doesn't resolve on the prod
-    //     network — an accidental defense layer that blocks any code path
-    //     inside staging from opening direct pg.Pool connections to other
-    //     databases in the prod postgres cluster using the real superuser
-    //     password trapped inside DATABASE_URL. Costs nothing to keep
-    //     since no legitimate consumer in staging needs the real value.
+    //   - DB_ADMIN_URL: staging gets only its dedicated DATABASE_URL and
+    //     never the platform's database-admin connection. No legitimate
+    //     staging consumer needs cross-database administrative access.
     //     See SELF-HOSTING.md Phase 5 risks.
     //
     // The platform-owned half of the env (identity trio, PORT, USERNODE_ENV,
@@ -379,8 +385,13 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
     // detected as stale with no change to the sweeper (#851).
     const platformEnv = stagingEnv.platformStagingEnv(app, config);
 
-    const containerId = await docker.runContainer(containerName, {
-      image: imageName,
+    const healthStartedAt = Date.now();
+    const deployed = await applicationRuntime.deploy(config, {
+      app,
+      environment: 'staging',
+      sessionId: session.id,
+      imageRef: build.imageRef,
+      dockerName: containerName,
       env: {
         DATABASE_URL: stagingDbUrl,
         ...platformEnv,
@@ -396,25 +407,13 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
         [stagingEnv.LABEL_ENV_FP]: stagingEnv.envFingerprint(platformEnv),
       },
     });
-
-    // 6. Wait for health
-    const healthStartedAt = Date.now();
-    await docker.waitForHealthy(containerName, 3000, '/health');
     timings.healthMs = Date.now() - healthStartedAt;
-
-    // 7. Determine accessible URL. No Caddy route to register: the
-    // wildcard site in the Caddyfile maps this hostname straight to the
-    // staging container (usernode-staging-<slug>--<id>) and issues TLS
-    // on-demand, so having the container up + named is enough to serve it.
-    const hostname = caddy.stagingHostname(app.slug, `s${session.id}`);
-
-    // See routes/apps.js for why we don't key off DOCKER_NETWORK anymore.
-    const isLocalDev = process.env.NODE_ENV === 'development' || process.env.USERNODE_LOCAL_DEV === '1';
-    let stagingUrl = `https://${hostname}`;
-    if (isLocalDev) {
-      const hostPort = await docker.getHostPort(containerName, 3000);
-      if (hostPort) stagingUrl = `http://localhost:${hostPort}`;
-    }
+    const { hostname, url: stagingUrl } = deployed;
+    await getPool(config).query(
+      `UPDATE chat_sessions SET staging_image_ref = $1, staging_build_ref = $2,
+         staging_runtime_kind = $3, staging_runtime_name = $4 WHERE id = $5`,
+      [build.imageRef, build.buildRef, deployed.runtimeKind, deployed.runtimeName, session.id]
+    );
 
     // NOTE: the edge verification intentionally does NOT happen here. The
     // caller persists staging_url after this function returns, and that is
@@ -431,20 +430,33 @@ async function buildAndDeployStagingInner(config, session, app, commitHash) {
     // to a phase (visuals.captureForSession opens the kind='checks' run and
     // records these as its build-half steps). Purely diagnostic — no caller
     // branches on it, and it is absent on paths that reuse a live preview.
-    return { containerId, stagingUrl, hostname, timings };
+    return {
+      containerId: deployed.runtimeKind === 'docker' ? deployed.runtimeName : null,
+      runtimeKind: deployed.runtimeKind,
+      runtimeName: deployed.runtimeName,
+      imageRef: build.imageRef,
+      buildRef: build.buildRef,
+      stagingUrl,
+      hostname,
+      timings,
+    };
   } catch (err) {
     log.error('staging', 'Staging build failed', { sessionId: session.id, err: err.message });
     // Cleanup on failure — short grace, this container is being discarded.
     // Best-effort (the build already failed; nothing downstream forgets this
     // container, and the by-name sweeper is the backstop) but logged rather
     // than swallowed, same reasoning as step 4 above (#851).
-    const cleaned = await docker.stopAndRemove(containerName, {
-      stopTimeoutSec: docker.STAGING_STOP_GRACE_SEC,
-    }).catch((e) => ({ removed: false, error: e.message })) || {};
-    if (cleaned.removed === false) {
-      log.warn('staging', 'Failed-build cleanup left a container behind', {
-        sessionId: session.id, containerName, err: cleaned.error || null,
-      });
+    // Kubernetes deploys reconcile deterministic resource names on retry;
+    // Docker needs an explicit by-name cleanup after a partial start.
+    if (applicationRuntime.mode(config) === 'docker') {
+      const cleaned = await docker.stopAndRemove(containerName, {
+        stopTimeoutSec: docker.STAGING_STOP_GRACE_SEC,
+      }).catch((e) => ({ removed: false, error: e.message })) || {};
+      if (cleaned.removed === false) {
+        log.warn('staging', 'Failed-build cleanup left a container behind', {
+          sessionId: session.id, containerName, err: cleaned.error || null,
+        });
+      }
     }
     throw err;
   }
@@ -522,10 +534,20 @@ async function teardownStaging(session, app) {
   // Short grace: the preview is going away for good, so there is nothing
   // to drain. Before #767 this step alone cost a flat ~10.9s on every
   // merge, purely waiting out a SIGTERM the container never received.
-  if (session.staging_container_id) {
-    const result = await docker.stopAndRemove(session.staging_container_id, {
+  if (session.staging_runtime_name || session.staging_container_id) {
+    const runtimeKind = session.staging_runtime_kind || 'docker';
+    const runtimeName = session.staging_runtime_name || session.staging_container_id;
+    const teardownConfig = {
+      appRuntime: runtimeKind,
+      kubernetes: { appNamespace: process.env.APP_NAMESPACE || 'social-apps' },
+    };
+    const result = await applicationRuntime.remove(teardownConfig, {
+      runtimeKind,
+      runtimeName,
+    }, {
       stopTimeoutSec: docker.STAGING_STOP_GRACE_SEC,
-    }).catch((err) => ({ removed: false, error: err.message })) || {};
+    }).then((value) => value || { removed: true })
+      .catch((err) => ({ removed: false, error: err.message }));
 
     // An EXPLICIT `removed: false` is the leak. A result with no flag at all
     // means the removal reported nothing either way, and the pre-#851
@@ -533,9 +555,10 @@ async function teardownStaging(session, app) {
     // "unknown" would strand every row behind any caller or wrapper that
     // doesn't carry the flag. docker.stopAndRemove always sets it.
     if (result.removed === false) {
-      log.error('staging', 'Staging teardown LEAKED a container — keeping the DB link so it can be retried', {
+      log.error('staging', 'Staging teardown LEAKED a runtime — keeping the DB link so it can be retried', {
         sessionId: session.id,
-        containerId: session.staging_container_id,
+        runtimeKind,
+        runtimeName,
         err: result.error || null,
       });
       // The only durable trace: the job that noticed is in-memory, and the
@@ -545,7 +568,9 @@ async function teardownStaging(session, app) {
         type: events.EVENT_TYPES.STAGING_TEARDOWN_LEAKED,
         metadata: {
           sessionId: session.id,
-          containerId: session.staging_container_id,
+          containerId: runtimeKind === 'docker' ? runtimeName : null,
+          runtimeKind,
+          runtimeName,
           appSlug: app ? app.slug : null,
           error: result.error || null,
         },
@@ -575,7 +600,9 @@ async function teardownStaging(session, app) {
   // so stopping the container is what takes the preview offline; the cached
   // cert expires on its own.)
   await getPool().query(
-    `UPDATE chat_sessions SET staging_url = NULL, staging_container_id = NULL WHERE id = $1`,
+    `UPDATE chat_sessions SET staging_url = NULL, staging_container_id = NULL,
+       staging_image_ref = NULL, staging_build_ref = NULL,
+       staging_runtime_kind = NULL, staging_runtime_name = NULL WHERE id = $1`,
     [session.id]
   ).catch((err) => log.warn('staging', 'Failed to clear staging_url on teardown', { sessionId: session.id, err: err.message }));
 
@@ -736,11 +763,14 @@ async function rebuildProductionInner(config, app) {
       throw new MissingSecretsError(merge.missingRequired);
     }
 
-    await docker.buildImage(cloneDir, imageName);
+    const build = await applicationRuntime.build(config, {
+      app,
+      revision: mainSha,
+      environment: 'production',
+      sourceDir: cloneDir,
+      dockerImage: imageName,
+    });
     await docker.execFileAsync('rm', ['-rf', cloneDir]).catch(() => {});
-
-    // Stop old container and start new one
-    await docker.stopAndRemove(containerName).catch(() => {});
 
     // Reload the app row to pick up apps.db_password — the per-role
     // migration in db/migrate.js may have populated it after the
@@ -764,8 +794,11 @@ async function rebuildProductionInner(config, app) {
     // Likewise the app-storage env pair (#752) — production only; the
     // staging path above deliberately injects neither storage var.
     const storageEnv = await appStorageEnv.productionStorageEnv(prodPool, app.id);
-    const containerId = await docker.runContainer(containerName, {
-      image: imageName,
+    const deployed = await applicationRuntime.deploy(config, {
+      app,
+      environment: 'production',
+      imageRef: build.imageRef,
+      dockerName: containerName,
       env: {
         DATABASE_URL: dbUrl,
         ...appIdentityEnv(app, config),
@@ -775,10 +808,7 @@ async function rebuildProductionInner(config, app) {
         ...storageEnv,
         ...merge.env,
       },
-      port: 3000,
     });
-
-    await docker.waitForHealthy(containerName, 3000, '/health');
 
     // No Caddy route to register. The wildcard site in the Caddyfile
     // maps `<slug>.<domain>` straight to this container
@@ -792,13 +822,23 @@ async function rebuildProductionInner(config, app) {
     // funnels through here, so this is the single reset chokepoint for
     // the rebuild paths (dev-chat merge, drift poller, /redeploy).
     await prodPool.query(
-      'UPDATE apps SET last_failure = NULL WHERE id = $1', [app.id]
+      `UPDATE apps SET last_failure = NULL, container_id = $1, image_ref = $2,
+         build_ref = $3, runtime_kind = $4, runtime_name = $5 WHERE id = $6`,
+      [deployed.runtimeKind === 'docker' ? deployed.runtimeName : null,
+       build.imageRef, build.buildRef, deployed.runtimeKind, deployed.runtimeName, app.id]
     ).catch((e) => log.warn('staging', 'Failed to clear last_failure', { app: app.slug, err: e.message }));
 
     log.info('staging', 'Production rebuilt', { app: app.slug, sha: mainSha });
     succeeded = true;
     resultSha = mainSha;
-    return { containerId, sha: mainSha };
+    return {
+      containerId: deployed.runtimeKind === 'docker' ? deployed.runtimeName : null,
+      runtimeKind: deployed.runtimeKind,
+      runtimeName: deployed.runtimeName,
+      imageRef: build.imageRef,
+      buildRef: build.buildRef,
+      sha: mainSha,
+    };
   } catch (err) {
     if (err instanceof MissingSecretsError) {
       missingSecretsFromErr = err.missingSecrets;

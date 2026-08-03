@@ -25,13 +25,15 @@
 // the 'staging:private' COMMENTs survived so the scrub passes still find
 // their targets.
 //
-// No real docker/postgres here — child_process is stubbed at the same seam
+// No real postgres here — child_process is stubbed at the same seam
 // tests/db-manager-scrub.test.js uses.
 //
 // Run with: node --test tests/db-clone-exclude-data.test.js
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
 
 function stub(id, exports) {
   require.cache[id] = { id, filename: id, loaded: true, exports, paths: [] };
@@ -40,9 +42,11 @@ function stub(id, exports) {
 // Loads db-manager with child_process stubbed. `discovery` is the canned
 // psql -At output for the exclusion-discovery query (one qualified table name
 // per line), or an Error to simulate a discovery failure. Records every
-// docker exec the module issues so tests can assert on the dump pipeline and
-// on the ordering of the scrub passes.
+// PostgreSQL command the module issues so tests can assert on the networked
+// dump/restore pipeline and on the ordering of the scrub passes.
 function loadDbManager({ discovery = [], truncateDiscovery = [], columnDiscovery = [] } = {}) {
+  const originalDbAdminUrl = process.env.DB_ADMIN_URL;
+  process.env.DB_ADMIN_URL = 'postgres://usernode:test@db.example.test:5432/usernode';
   const ids = {
     childProcess: require.resolve('child_process'),
     logger: require.resolve('../src/services/logger'),
@@ -52,12 +56,10 @@ function loadDbManager({ discovery = [], truncateDiscovery = [], columnDiscovery
   for (const [k, id] of Object.entries(ids)) orig[k] = require.cache[id];
 
   const calls = [];
-  const fakeExecFile = (cmd, args) => {
+  const fakeExecFile = (cmd, args, opts = {}) => {
     const dashC = args.indexOf('-c');
     const sql = dashC >= 0 ? args[dashC + 1] : '';
-    const shellIdx = args.indexOf('sh');
-    const script = shellIdx >= 0 ? args[args.length - 1] : '';
-    calls.push({ cmd, args, sql, script });
+    calls.push({ cmd, args, sql, env: opts.env || {} });
 
     // The exclusion discovery: the only query with the recursive closure.
     if (/WITH RECURSIVE/.test(sql) && /obj_description/.test(sql)) {
@@ -76,7 +78,18 @@ function loadDbManager({ discovery = [], truncateDiscovery = [], columnDiscovery
   };
   fakeExecFile[require('util').promisify.custom] = fakeExecFile;
 
-  stub(ids.childProcess, { execFile: fakeExecFile, spawn: () => { throw new Error('unused'); } });
+  const fakeSpawn = (cmd, args, opts = {}) => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    calls.push({ cmd, args, env: opts.env || {} });
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+
+  stub(ids.childProcess, { execFile: fakeExecFile, spawn: fakeSpawn });
   stub(ids.logger, { info() {}, warn() {}, error() {}, debug() {} });
   delete require.cache[ids.subject];
   const dbManager = require(ids.subject);
@@ -85,13 +98,16 @@ function loadDbManager({ discovery = [], truncateDiscovery = [], columnDiscovery
     for (const [k, id] of Object.entries(ids)) {
       if (orig[k]) require.cache[id] = orig[k]; else delete require.cache[id];
     }
+    if (originalDbAdminUrl === undefined) delete process.env.DB_ADMIN_URL;
+    else process.env.DB_ADMIN_URL = originalDbAdminUrl;
   };
   return { dbManager, calls, restore };
 }
 
-const dumpScript = (calls) => (calls.find((c) => /pg_dump/.test(c.script)) || {}).script || '';
-const excludedFrom = (script) =>
-  [...script.matchAll(/--exclude-table-data=(\S+)/g)].map((m) => m[1]);
+const spawned = (calls, command) => calls.find((c) => c.cmd === command);
+const excludedFrom = (call) => (call?.args || [])
+  .filter((arg) => arg.startsWith('--exclude-table-data='))
+  .map((arg) => arg.slice('--exclude-table-data='.length));
 
 // ── privateDataExclusions: discovery ───────────────────────────────────
 
@@ -125,7 +141,7 @@ test('privateDataExclusions returns the parsed, trimmed table list', async () =>
 test('privateDataExclusions drops a non-standard identifier instead of splicing it', async () => {
   // Dropping it is safe — the table's data is still dumped AND the truncate
   // pass still empties it, so we lose the speedup for that one table and
-  // nothing else. Splicing it into a shell command would not be safe.
+  // nothing else. Passing it to pg_dump would not be safe.
   const { dbManager, restore } = loadDbManager({
     discovery: [
       'public.chat_sessions',
@@ -195,16 +211,22 @@ test('cloneDatabase passes one --exclude-table-data per discovered table and no 
   const { dbManager, calls, restore } = loadDbManager({ discovery });
   try {
     await dbManager.cloneDatabase('app_demo', 'app_demo_staging_x_abc123');
-    const script = dumpScript(calls);
-    assert.deepEqual(excludedFrom(script), discovery);
-    // Shape of the pipeline is otherwise untouched: custom format, piped
-    // straight into pg_restore, pipefail so a dump failure isn't masked.
-    assert.match(script, /set -o pipefail/);
-    assert.match(script, /pg_dump -U \w+ -Fc/);
-    assert.match(script, /\| pg_restore -U \w+ --no-owner --no-privileges -d app_demo_staging_x_abc123/);
+    const dump = spawned(calls, 'pg_dump');
+    const restoreCall = spawned(calls, 'pg_restore');
+    assert.deepEqual(excludedFrom(dump), discovery);
+    // Shape of the pipeline is otherwise untouched: custom format streamed
+    // directly into pg_restore, with both child exit codes checked by the
+    // implementation so a dump failure cannot be masked.
+    assert.ok(dump.args.includes('-Fc'));
+    assert.equal(dump.env.PGDATABASE, 'app_demo');
+    assert.deepEqual(restoreCall.args, [
+      '--exit-on-error', '--no-owner', '--no-privileges',
+      '--dbname', 'app_demo_staging_x_abc123',
+    ]);
+    assert.equal(restoreCall.env.PGDATABASE, 'app_demo_staging_x_abc123');
     // COMMENTs must survive — the scrub passes discover their targets from
     // them, so --no-comments would silently disable redaction.
-    assert.ok(!/--no-comments/.test(script), 'comments must be kept in the dump');
+    assert.ok(!dump.args.includes('--no-comments'), 'comments must be kept in the dump');
   } finally { restore(); }
 });
 
@@ -212,8 +234,10 @@ test('the dump is unfiltered when nothing is marked private', async () => {
   const { dbManager, calls, restore } = loadDbManager({ discovery: [] });
   try {
     await dbManager.cloneDatabase('app_demo', 'app_demo_staging_x_abc123');
-    assert.deepEqual(excludedFrom(dumpScript(calls)), []);
-    assert.match(dumpScript(calls), /pg_dump -U \w+ -Fc app_demo/);
+    const dump = spawned(calls, 'pg_dump');
+    assert.deepEqual(excludedFrom(dump), []);
+    assert.ok(dump.args.includes('-Fc'));
+    assert.equal(dump.env.PGDATABASE, 'app_demo');
   } finally { restore(); }
 });
 
@@ -223,11 +247,11 @@ test('the exclusion set is discovered from the SOURCE, before the clone has data
     await dbManager.cloneDatabase('app_demo', 'app_demo_staging_x_abc123');
     const discoveryCall = calls.find((c) => /WITH RECURSIVE/.test(c.sql));
     assert.ok(discoveryCall, 'discovery ran');
-    // psql -d <source>: the clone is still empty at this point, so asking it
-    // what is private would return nothing and skip nothing.
-    assert.equal(discoveryCall.args[discoveryCall.args.indexOf('-d') + 1], 'app_demo');
+    // PGDATABASE=<source>: the clone is still empty at this point, so asking
+    // it what is private would return nothing and skip nothing.
+    assert.equal(discoveryCall.env.PGDATABASE, 'app_demo');
     const discoveryAt = calls.indexOf(discoveryCall);
-    const dumpAt = calls.findIndex((c) => /pg_dump/.test(c.script));
+    const dumpAt = calls.findIndex((c) => c.cmd === 'pg_dump');
     assert.ok(discoveryAt < dumpAt, 'discovery precedes the dump');
   } finally { restore(); }
 });
@@ -251,7 +275,7 @@ test('truncate + scrub still run after the copy, and still reset identities', as
     assert.equal(truncate.sql, 'TRUNCATE public.chat_sessions RESTART IDENTITY CASCADE');
     assert.ok(calls.some((c) => /^UPDATE public\.users SET password_hash/.test(c.sql)),
       'the column scrub still runs');
-    const dumpAt = calls.findIndex((c) => /pg_dump/.test(c.script));
+    const dumpAt = calls.findIndex((c) => c.cmd === 'pg_dump');
     assert.ok(dumpAt < calls.indexOf(truncate), 'the copy precedes the scrub passes');
   } finally { restore(); }
 });

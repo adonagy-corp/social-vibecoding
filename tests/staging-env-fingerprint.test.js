@@ -227,14 +227,14 @@ test('LABEL_ENV_FP is the namespaced label name the sweeper reads', () => {
 // ended up on half a core while the post-build screenshot + checks pass
 // drove a headless browser against them.
 
-test('#816 the staging build passes explicit memory + cpus to runContainer', () => {
+test('#816 the staging build passes explicit memory + cpus to the runtime dispatcher', () => {
   const src = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'services', 'staging.js'), 'utf8'
   );
   // Scope to the staging container launch (the prod rebuild in the same
   // file deliberately keeps the app defaults).
-  const start = src.indexOf('const containerId = await docker.runContainer(containerName, {');
-  assert.notStrictEqual(start, -1, 'staging runContainer call not found');
+  const start = src.indexOf('const deployed = await applicationRuntime.deploy(config, {');
+  assert.notStrictEqual(start, -1, 'staging runtime deploy call not found');
   const call = src.slice(start, src.indexOf('});', start));
   assert.match(call, /memory:\s*docker\.STAGING_MEMORY/, 'memory comes from the named constant');
   assert.match(call, /cpus:\s*docker\.STAGING_CPUS/, 'cpus comes from the named constant');

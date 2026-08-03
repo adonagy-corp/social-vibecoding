@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const log = require('./logger');
 const platformJwt = require('./platform-jwt');
 const docker = require('./docker');
+const kubernetes = require('./kubernetes');
 const github = require('./github');
 const models = require('./models');
 const inLoopBrowser = require('./in-loop-browser');
@@ -19,6 +20,42 @@ const WORKER_IMAGE = 'usernode-worker:latest';
 const WORKER_MEMORY = process.env.WORKER_MEMORY || '2g';
 const WORKER_CPUS = process.env.WORKER_CPUS || '2';
 const WARM_READY_TIMEOUT_MS = 5 * 60 * 1000;
+
+function usesKubernetesWorkers() {
+  const mode = process.env.WORKER_RUNTIME || process.env.APP_RUNTIME || 'docker';
+  if (!['docker', 'kubernetes'].includes(mode)) {
+    throw new Error(`Unsupported WORKER_RUNTIME=${mode}`);
+  }
+  return mode === 'kubernetes';
+}
+
+function kubernetesWorkerConfig() {
+  return {
+    workerMemory: WORKER_MEMORY,
+    workerCpus: WORKER_CPUS,
+    kubernetes: {
+      workerNamespace: process.env.WORKER_NAMESPACE || 'social-workers',
+      workerServiceAccount: process.env.WORKER_SERVICE_ACCOUNT || 'social-worker',
+      workerImage: process.env.KUBERNETES_WORKER_IMAGE || '',
+      workerStorageClass: process.env.WORKER_STORAGE_CLASS || '',
+      workerStorageSize: process.env.WORKER_STORAGE_SIZE || '5Gi',
+    },
+  };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+async function execWorkerCommand(runtimeName, command, stdinText = null) {
+  if (usesKubernetesWorkers()) {
+    return kubernetes.execInWorker(kubernetesWorkerConfig(), runtimeName, command, stdinText);
+  }
+  if (stdinText !== null) {
+    return docker.execShellStdin(runtimeName, stdinText, { timeoutMs: 20000, label: 'worker exec' });
+  }
+  return docker.execFileAsync('docker', ['exec', runtimeName, ...command], { timeout: 30000 });
+}
 
 // URL the worker container uses to reach the platform's internal API
 // (push proxy, PR creation, etc.). Both containers run on the same
@@ -617,6 +654,12 @@ function recordClaudeCodingRun({
 // ──────────────────────────────────────────────────────────────────────
 
 async function ensureWorkerImage() {
+  if (usesKubernetesWorkers()) {
+    if (!(process.env.KUBERNETES_WORKER_IMAGE || '').includes('@sha256:')) {
+      throw new Error('KUBERNETES_WORKER_IMAGE must be configured with an immutable digest');
+    }
+    return;
+  }
   // Always build; Docker's layer cache makes this fast when nothing's
   // changed, and crucially picks up edits to worker-run.sh / run-cc.sh
   // without requiring a manual `docker rmi`.
@@ -703,9 +746,13 @@ async function writeTurnPrompt(sessionId, prompt) {
   if (!meta) {
     throw new Error(`writeTurnPrompt: no warm worker registered for session ${sessionId}`);
   }
-  await docker.execShellStdin(meta.containerName, buildTurnPromptScript(prompt), {
-    timeoutMs: 20000, label: 'writeTurnPrompt',
-  });
+  if (usesKubernetesWorkers()) {
+    await execWorkerCommand(meta.containerName, ['sh', '-s'], buildTurnPromptScript(prompt));
+  } else {
+    await docker.execShellStdin(meta.containerName, buildTurnPromptScript(prompt), {
+      timeoutMs: 20000, label: 'writeTurnPrompt',
+    });
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1092,12 +1139,12 @@ function adoptWarmWorker(sessionId, containerName = null) {
 async function _bootstrapWarmContainer(sessionId, {
   repoOwner, repoName, branchName, onProgress,
 }) {
-  const containerName = workerContainerName(sessionId);
+  let containerName = workerContainerName(sessionId);
 
   // Defensive: scrub any leftover container at this name. ensureWorker
   // already checks for `running` and returns early; anything else (exited,
   // restarting, dead) gets reaped here so `docker run --name` can succeed.
-  await docker.stopAndRemove(containerName).catch(() => {});
+  if (!usesKubernetesWorkers()) await docker.stopAndRemove(containerName).catch(() => {});
 
   // Public-only invariant: the worker carries no GitHub credentials in
   // its env — it relies on the unauthenticated git protocol for clones
@@ -1131,7 +1178,7 @@ async function _bootstrapWarmContainer(sessionId, {
   // `docker exec` instead. worker-run.sh in warm mode only clones,
   // checks out, initializes files, and sleeps.
   const ccVolume = ccVolumeName(sessionId);
-  await docker.ensureVolume(ccVolume);
+  if (!usesKubernetesWorkers()) await docker.ensureVolume(ccVolume);
 
   const safeEnv = {
     GIT_AUTHOR_NAME: 'usernode-bot',
@@ -1149,6 +1196,15 @@ async function _bootstrapWarmContainer(sessionId, {
     SESSION_ID: String(sessionId),
     PLATFORM_URL: PLATFORM_INTERNAL_URL,
   };
+  if (usesKubernetesWorkers()) {
+    const result = await kubernetes.ensureWorker(kubernetesWorkerConfig(), {
+      sessionId,
+      env: safeEnv,
+    });
+    containerName = result.runtimeName;
+    log.info('worker', 'Warm worker Pod ready', { runtimeName: containerName, pvc: result.pvcName });
+    return containerName;
+  }
   const safeEnvArgs = Object.entries(safeEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 
   const network = process.env.DOCKER_NETWORK || 'shared-web';
@@ -1260,7 +1316,9 @@ async function ensureWorker(sessionId, {
   repoOwner, repoName, branchName,
   onProgress,
 } = {}) {
-  const containerName = workerContainerName(sessionId);
+  const containerName = usesKubernetesWorkers()
+    ? kubernetes.dnsName(`sv-worker-s${sessionId}`)
+    : workerContainerName(sessionId);
 
   // Coalesce concurrent ensures — if one's already racing, await it.
   const existing = _registryGet(sessionId);
@@ -1271,14 +1329,18 @@ async function ensureWorker(sessionId, {
 
   // Already warm? Confirm with Docker before trusting the registry —
   // an external `docker rm` would otherwise leave stale state.
-  const status = await docker.getContainerStatus(containerName);
+  const status = usesKubernetesWorkers()
+    ? await kubernetes.getWorkerStatus(kubernetesWorkerConfig(), containerName)
+    : await docker.getContainerStatus(containerName);
   if (status === 'running') {
     // Runtime-contract migration gate: earlier warm containers may have
     // stale bootstrap credentials, token requirements, or runner semantics
     // that the current host no longer supports. Detect them via the persisted
     // usernode.proxy label and force a re-bootstrap. Cheap — one Docker
     // inspect on the warm-path hot path.
-    const labels = await docker.getContainerLabels(containerName);
+    const labels = usesKubernetesWorkers()
+      ? { 'usernode.proxy': WORKER_BOOTSTRAP_ENV_VERSION }
+      : await docker.getContainerLabels(containerName);
     if (labels['usernode.proxy'] !== WORKER_BOOTSTRAP_ENV_VERSION) {
       log.info('worker', 'Evicting stale-label warm container', { containerName });
       await evictWorker(sessionId).catch((err) => {
@@ -1289,7 +1351,7 @@ async function ensureWorker(sessionId, {
       // fall through to the bootstrap branch below
     } else {
       if (!existing) {
-        _registryUpsert(sessionId, { lastUsedMs: Date.now(), inFlight: false });
+        _registryUpsert(sessionId, { containerName, lastUsedMs: Date.now(), inFlight: false });
       }
       return containerName;
     }
@@ -1299,10 +1361,11 @@ async function ensureWorker(sessionId, {
   // _bootstrapWarmContainer reaps any stale container before docker run.
   const bootstrap = (async () => {
     try {
-      await _bootstrapWarmContainer(sessionId, {
+      const runtimeName = await _bootstrapWarmContainer(sessionId, {
         repoOwner, repoName, branchName, onProgress,
       });
       _registryUpsert(sessionId, {
+        containerName: runtimeName,
         bootstrap: null,
         lastUsedMs: Date.now(),
         inFlight: false,
@@ -1658,10 +1721,18 @@ async function execInWorker(sessionId, {
     // the attached transport did.
     providerStartedAt = new Date();
     providerStartedMs = Date.now();
-    await docker.execFileAsync('docker', args, {
-      timeout: 30000,
-      env: { ...process.env, ...secretEnv },
-    });
+    if (usesKubernetesWorkers()) {
+      const exports = Object.entries({ ...secretEnv, ...safeEnv })
+        .map(([key, value]) => `export ${key}=${shellQuote(value)}`)
+        .join('\n');
+      const detached = `${exports}\nnohup sh -c ${shellQuote(args[args.length - 1])} >/dev/null 2>&1 &\n`;
+      await execWorkerCommand(containerName, ['sh', '-s'], detached);
+    } else {
+      await docker.execFileAsync('docker', args, {
+        timeout: 30000,
+        env: { ...process.env, ...secretEnv },
+      });
+    }
     providerDispatched = true;
     // The durable dispatch record was committed before docker exec. Advancing
     // the phase is required for normal operation, but after the process has
@@ -1716,9 +1787,7 @@ async function execInWorker(sessionId, {
     // the only copy of what the turn did, and the boot-adoption resume
     // replays it to rebuild `result` before running the tail.
     if (!holdTurnRecord && state.execExitSeen && !state.fatalError) {
-      docker.execFileAsync('docker', [
-        'exec', containerName, 'rm', '-f', journal,
-      ], { timeout: 5000 }).catch(() => {});
+      execWorkerCommand(containerName, ['rm', '-f', journal]).catch(() => {});
     }
     return state;
   } finally {
@@ -1920,6 +1989,33 @@ async function inspectContainerState(containerName) {
 // turn is still running (docker hiccup, etc.) we restart it and skip
 // the lines we already consumed.
 async function _consumeJournal(containerName, journal, progress, state, { sessionId = null } = {}) {
+  if (usesKubernetesWorkers()) {
+    let linesConsumed = 0;
+    const deadline = Date.now() + WORKER_JWT_TTL * 1000;
+    while (Date.now() < deadline) {
+      try {
+        const { stdout } = await execWorkerCommand(containerName, ['cat', journal]);
+        const lines = stdout.split('\n');
+        for (let i = linesConsumed; i < lines.length; i++) {
+          if (!lines[i]) continue;
+          linesConsumed += 1;
+          state.rawStdout += `${lines[i]}\n`;
+          parseLine(lines[i], progress, state);
+          if (state.execExitSeen) return state;
+        }
+      } catch (_) { /* journal may not exist yet */ }
+      const busy = await isWorkerExecuting(containerName);
+      if (busy === false && linesConsumed > 0) {
+        state.exitCode = state.exitCode ?? -1;
+        state.markerlessCause = 'turn_process_gone';
+        return state;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    state.exitCode = -1;
+    state.markerlessCause = 'probe_unobservable';
+    return state;
+  }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let linesConsumed = 0;
   let retails = 0;
@@ -2110,11 +2206,9 @@ async function stopTurn(sessionId) {
   const meta = _registryGet(sessionId);
   const containerName = meta?.containerName || workerContainerName(sessionId);
   _registryUpsert(sessionId, { stopRequestedAt: Date.now() });
-  await docker.execFileAsync('docker', [
-    'exec', containerName, 'sh', '-c',
+  await execWorkerCommand(containerName, ['sh', '-c',
     buildTurnStopScript(meta?.journal || null),
-    // Covers the ~2s SIGTERM grace plus daemon round-trip.
-  ], { timeout: 8000 }).catch(() => {});
+  ]).catch(() => {});
   log.info('worker', 'Stop signal sent (in-container kill + journal exit marker)', {
     containerName, sessionId, journal: meta?.journal || '(discovered in-container)',
   });
@@ -2161,9 +2255,13 @@ async function syncUserAgentFiles(sessionId, files) {
     throw new Error(`syncUserAgentFiles: no warm worker registered for session ${sessionId}`);
   }
   const { buildSyncShellScript } = require('./user-agent-files');
-  await docker.execShellStdin(meta.containerName, buildSyncShellScript(files || []), {
-    timeoutMs: 20000, label: 'syncUserAgentFiles',
-  });
+  if (usesKubernetesWorkers()) {
+    await execWorkerCommand(meta.containerName, ['sh', '-s'], buildSyncShellScript(files || []));
+  } else {
+    await docker.execShellStdin(meta.containerName, buildSyncShellScript(files || []), {
+      timeoutMs: 20000, label: 'syncUserAgentFiles',
+    });
+  }
   log.info('worker', 'Personal agent files synced', {
     sessionId, count: (files || []).length,
   });
@@ -2255,7 +2353,11 @@ async function resumeTurnFromJournal(sessionId, {
 async function evictWorker(sessionId) {
   const meta = _registryGet(sessionId);
   const containerName = meta?.containerName || workerContainerName(sessionId);
-  await docker.stopAndRemove(containerName).catch(() => {});
+  if (usesKubernetesWorkers()) {
+    await kubernetes.deleteWorker(kubernetesWorkerConfig(), sessionId, { deleteVolume: false }).catch(() => {});
+  } else {
+    await docker.stopAndRemove(containerName).catch(() => {});
+  }
   _warmRegistry.delete(sessionId);
   log.info('worker', 'Worker evicted (volume preserved)', { containerName });
 }
@@ -2335,6 +2437,7 @@ async function watchWorker(containerName, { onProgress, fromStart = true } = {})
 //   - "exited"   : single-shot finished; needs log scrape + cleanup.
 //   - "created"/"restarting"/etc.: rare, treat as broken → reap.
 async function listOrphanWorkers() {
+  if (usesKubernetesWorkers()) return kubernetes.listWorkers(kubernetesWorkerConfig());
   try {
     const { stdout } = await docker.execFileAsync('docker', [
       'ps', '-a',
@@ -2449,9 +2552,11 @@ function buildTurnStopScript(journal) {
 // the real-time channel); other callers keep the snappy default.
 async function isWorkerExecuting(containerName, { timeoutMs = 5000 } = {}) {
   try {
-    const { stdout } = await docker.execFileAsync('docker', [
-      'exec', containerName, 'sh', '-c', TURN_PROC_PROBE_SCRIPT,
-    ], { timeout: timeoutMs });
+    const { stdout } = usesKubernetesWorkers()
+      ? await execWorkerCommand(containerName, ['sh', '-c', TURN_PROC_PROBE_SCRIPT])
+      : await docker.execFileAsync('docker', [
+          'exec', containerName, 'sh', '-c', TURN_PROC_PROBE_SCRIPT,
+        ], { timeout: timeoutMs });
     const out = stdout.trim();
     if (out === 'busy') return true;
     if (out === 'idle') return false;
@@ -2468,8 +2573,12 @@ async function isWorkerExecuting(containerName, { timeoutMs = 5000 } = {}) {
 // For ordinary idle eviction during a session, use `evictWorker`
 // instead — same effect, but the function name signals intent better.
 async function destroyWorker(containerName) {
-  await docker.stopAndRemove(containerName).catch(() => {});
-  const m = containerName.match(/^usernode-worker-(\d+)$/);
+  const m = containerName.match(/(?:usernode-worker-|sv-worker-s)(\d+)$/);
+  if (usesKubernetesWorkers() && m) {
+    await kubernetes.deleteWorker(kubernetesWorkerConfig(), parseInt(m[1], 10), { deleteVolume: false }).catch(() => {});
+  } else {
+    await docker.stopAndRemove(containerName).catch(() => {});
+  }
   if (m) _warmRegistry.delete(parseInt(m[1], 10));
   log.info('worker', 'Worker destroyed', { containerName });
 }
@@ -2478,7 +2587,11 @@ async function destroyWorker(containerName) {
 // session is archived (permanent teardown). Safe to call even if the
 // volume was never created.
 async function destroyCcVolume(sessionId) {
-  await docker.removeVolume(ccVolumeName(sessionId));
+  if (usesKubernetesWorkers()) {
+    await kubernetes.deleteWorker(kubernetesWorkerConfig(), sessionId, { deleteVolume: true });
+  } else {
+    await docker.removeVolume(ccVolumeName(sessionId));
+  }
 }
 
 // #155: copy one session's CC memory volume (~/.claude) into another
@@ -2489,6 +2602,11 @@ async function destroyCcVolume(sessionId) {
 // source volume doesn't exist or the copy fails; callers treat a clone
 // failure as "start with fresh CC memory" (cc_session_id stays NULL).
 async function cloneCcVolume(srcSessionId, destSessionId) {
+  if (usesKubernetesWorkers()) {
+    await kubernetes.cloneWorkerVolume(kubernetesWorkerConfig(), srcSessionId, destSessionId);
+    log.info('worker', 'CC PVC cloned', { from: srcSessionId, to: destSessionId });
+    return;
+  }
   const src = ccVolumeName(srcSessionId);
   const dest = ccVolumeName(destSessionId);
   // Throws if the source volume was never created (e.g. the headless run
@@ -2576,10 +2694,17 @@ async function execPushFromWorker(sessionId, branchName) {
   ];
 
   try {
-    const { stdout, stderr } = await docker.execFileAsync('docker', args, {
-      timeout: 60000,
-      env: { ...process.env, PAT: botToken, BRANCH: branchName },
-    });
+    let stdout;
+    let stderr;
+    if (usesKubernetesWorkers()) {
+      const script = `export PAT=${shellQuote(botToken)}\nexport BRANCH=${shellQuote(branchName)}\n${inlineScript}\n`;
+      ({ stdout, stderr } = await execWorkerCommand(containerName, ['bash', '-s'], script));
+    } else {
+      ({ stdout, stderr } = await docker.execFileAsync('docker', args, {
+        timeout: 60000,
+        env: { ...process.env, PAT: botToken, BRANCH: branchName },
+      }));
+    }
     const sha = (stdout || '').trim().split('\n').pop();
     log.info('worker', 'Push proxied to GitHub', {
       sessionId, branch: branchName, sha: (sha || '').slice(0, 8),

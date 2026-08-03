@@ -26,6 +26,8 @@ function stub(id, exports) {
 // discovered column. `discoveryRows` is the canned psql -At output (one
 // line per column) for the discovery query.
 function loadDbManager(discoveryRows) {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://usernode:test@db.example.test:5432/usernode';
   const ids = {
     childProcess: require.resolve('child_process'),
     logger: require.resolve('../src/services/logger'),
@@ -57,6 +59,8 @@ function loadDbManager(discoveryRows) {
     for (const [k, id] of Object.entries(ids)) {
       if (orig[k]) require.cache[id] = orig[k]; else delete require.cache[id];
     }
+    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrl;
   };
   return { dbManager, updateCalls, restore };
 }

@@ -32,6 +32,7 @@ function loadStaging({ cloneDelayMs = 20, buildImageImpl = null } = {}) {
   const ids = {
     logger: require.resolve('../src/services/logger'),
     docker: require.resolve('../src/services/docker'),
+    applicationRuntime: require.resolve('../src/services/application-runtime'),
     caddy: require.resolve('../src/services/caddy'),
     dbManager: require.resolve('../src/services/db-manager'),
     github: require.resolve('../src/services/github'),

@@ -9,6 +9,7 @@ const nodeStatus = require('./node-status');
 // Aliased to avoid colliding with the per-session `worker` local later
 // in this file (where `worker = workers.find(...)` rebinds the name).
 const workerSvc = require('./worker');
+const applicationRuntime = require('./application-runtime');
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +102,7 @@ async function gatherFull(config) {
   const [appsQ, sessionsQ, llmQ, sessionCountsQ, containers, stats] = await Promise.all([
     pool.query(
       `SELECT a.id, a.name, a.slug, a.repo_url, a.container_id, a.status, a.created_at,
+              a.image_ref, a.build_ref, a.runtime_kind, a.runtime_name,
               u.username AS created_by_username,
               (SELECT COUNT(*) FROM chat_sessions cs
                  WHERE cs.app_id = a.id AND cs.status = 'active') AS open_sessions,
@@ -113,6 +115,7 @@ async function gatherFull(config) {
     pool.query(
       `SELECT cs.id, cs.app_id, cs.branch_name, cs.pr_number, cs.pr_url, cs.pr_title,
               cs.session_title, cs.staging_container_id, cs.staging_url, cs.status, cs.created_at,
+              cs.staging_image_ref, cs.staging_build_ref, cs.staging_runtime_kind, cs.staging_runtime_name,
               u.username, u.id AS user_id, a.slug AS app_slug
        FROM chat_sessions cs
        LEFT JOIN users u ON cs.user_id = u.id
@@ -166,9 +169,14 @@ async function gatherFull(config) {
   }
 
   const workerContainers = containers.filter((c) => c.name.startsWith(WORKER_PREFIX));
+  for (const meta of workerSvc.warmRegistrySnapshot()) {
+    if (!workerContainers.some((container) => container.name === meta.containerName)) {
+      workerContainers.push({ name: meta.containerName, id: null, state: 'running', status: 'Kubernetes Deployment' });
+    }
+  }
   const workers = await Promise.all(workerContainers.map(async (c) => {
     const startedAt = await inspectStarted(c.name);
-    const sessionId = parseInt(c.name.slice(WORKER_PREFIX.length), 10) || null;
+    const sessionId = parseInt(c.name.match(/(?:usernode-worker-|sv-worker-s)(\d+)$/)?.[1], 10) || null;
     const sess = sessions.find((s) => s.id === sessionId);
     const prog = workerProgress.get(sessionId);
     const uptime = uptimeSeconds(startedAt);
@@ -219,15 +227,23 @@ async function gatherFull(config) {
 
   // Apps — nest sessions, nest worker under each session.
   const appTree = await Promise.all(apps.map(async (app) => {
-    const prodName = `${APP_PREFIX}${app.slug}`;
+    const prodName = app.runtime_name || `${APP_PREFIX}${app.slug}`;
     const prod = byName[prodName];
-    const prodStarted = prod ? await inspectStarted(prodName) : null;
+    const prodRuntimeKind = app.runtime_kind || 'docker';
+    const prodState = prodRuntimeKind === 'kubernetes' && app.runtime_name
+      ? await applicationRuntime.status(config, { runtimeKind: 'kubernetes', runtimeName: app.runtime_name }).catch(() => 'unknown')
+      : (prod?.state || 'not_found');
+    const prodStarted = prodRuntimeKind === 'docker' && prod ? await inspectStarted(prodName) : null;
 
-    const appSessions = sessions
+    const appSessions = await Promise.all(sessions
       .filter((s) => s.app_id === app.id)
-      .map((s) => {
-        const stagingName = `${STAGING_PREFIX}${app.slug}--${s.id}`;
+      .map(async (s) => {
+        const stagingName = s.staging_runtime_name || `${STAGING_PREFIX}${app.slug}--${s.id}`;
         const staging = byName[stagingName];
+        const stagingRuntimeKind = s.staging_runtime_kind || 'docker';
+        const stagingState = stagingRuntimeKind === 'kubernetes' && s.staging_runtime_name
+          ? await applicationRuntime.status(config, { runtimeKind: 'kubernetes', runtimeName: s.staging_runtime_name }).catch(() => 'unknown')
+          : (staging?.state || 'not_found');
         const worker = workers.find((w) => w.sessionId === s.id) || null;
         return {
           id: s.id,
@@ -242,13 +258,13 @@ async function gatherFull(config) {
           createdAt: s.created_at,
           ageSeconds: uptimeSeconds(s.created_at),
           status: s.status,
-          staging: staging ? {
-            name: staging.name,
-            state: staging.state,
-            status: staging.status,
-            stats: stats[staging.name] || null,
+          staging: stagingState !== 'not_found' ? {
+            name: stagingName,
+            state: stagingState,
+            status: staging?.status || stagingState,
+            stats: stats[stagingName] || null,
           } : null,
-          stagingDriftWarning: !!s.staging_container_id && !staging,
+          stagingDriftWarning: !!(s.staging_runtime_name || s.staging_container_id) && stagingState === 'not_found',
           worker: worker ? {
             name: worker.name,
             state: worker.state,
@@ -265,7 +281,7 @@ async function gatherFull(config) {
             idleMs: worker.idleMs,
           } : null,
         };
-      });
+      }));
 
     return {
       id: app.id,
@@ -277,16 +293,16 @@ async function gatherFull(config) {
       createdAt: app.created_at,
       openSessions: parseInt(app.open_sessions, 10),
       openIssues: parseInt(app.open_issues, 10),
-      prod: prod ? {
+      prod: prodState !== 'not_found' ? {
         name: prodName,
-        state: prod.state,
-        status: prod.status,
-        image: prod.image,
+        state: prodState,
+        status: prod?.status || prodState,
+        image: app.image_ref || prod?.image,
         startedAt: prodStarted,
         uptimeSeconds: uptimeSeconds(prodStarted),
         stats: stats[prodName] || null,
       } : null,
-      prodMissing: !prod && app.status !== 'creating',
+      prodMissing: prodState === 'not_found' && app.status !== 'creating',
       sessions: appSessions,
     };
   }));

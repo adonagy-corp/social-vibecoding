@@ -177,9 +177,9 @@ test('staging call sites pass the short grace', () => {
   const src = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'services', 'staging.js'), 'utf8'
   );
-  const shortGraceCalls = src.match(/stopAndRemove\([^)]*STAGING_STOP_GRACE_SEC/gs) || [];
-  assert.ok(shortGraceCalls.length >= 3,
-    `expected >=3 staging stopAndRemove calls using the short grace, found ${shortGraceCalls.length}`);
+  const shortGraceOptions = src.match(/stopTimeoutSec: docker\.STAGING_STOP_GRACE_SEC/g) || [];
+  assert.ok(shortGraceOptions.length >= 3,
+    'expected all staging removal paths to retain the short grace');
 });
 
 // ── #851: stopAndRemove must report whether the container is actually gone ──

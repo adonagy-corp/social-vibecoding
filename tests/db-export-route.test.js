@@ -107,7 +107,7 @@ test.before(async () => {
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;
 
-  // Never let a test spawn `docker exec pg_dump`.
+  // Never let a test spawn networked `pg_dump`.
   realRunExport = dbExport.runExport;
   dbExport.runExport = async ({ res, filename, onStart }) => {
     if (typeof onStart === 'function') onStart();

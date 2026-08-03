@@ -54,9 +54,6 @@ services:
       # `docker exec <child> wget …` works for healthchecks. Same name
       # as the prod compose so behavior matches.
       DOCKER_NETWORK: usernode-net
-      # Container name `db-manager.js` `docker exec`'s into to spawn
-      # per-app databases.
-      DB_CONTAINER: vibecoding-db-dev
       # Internal URL workers + child apps use to reach the platform
       # over `usernode-net`. Defaults to `http://usernode:3000` (the
       # prod container name); in dev the platform runs as

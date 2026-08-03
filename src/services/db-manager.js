@@ -1,11 +1,10 @@
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const log = require('./logger');
 
 const execFileAsync = promisify(execFile);
 
-const DB_CONTAINER = process.env.DB_CONTAINER || 'project-usernode-db';
 const DB_USER = process.env.DB_USER || 'usernode';
 
 // All app DBs and their dedicated roles use these names. Slugs are
@@ -77,7 +76,39 @@ function connectionUrl(dbName, password) {
     );
   }
   const role = ownerRoleName(dbName);
-  return `postgres://${role}:${encodeURIComponent(password)}@${DB_CONTAINER}:5432/${dbName}`;
+  const admin = adminConnection();
+  admin.username = role;
+  admin.password = password;
+  admin.pathname = `/${dbName}`;
+  return admin.toString();
+}
+
+function adminConnection() {
+  const value = process.env.DB_ADMIN_URL || process.env.DATABASE_URL;
+  if (!value) throw new Error('DB_ADMIN_URL or DATABASE_URL is required for database administration');
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error('DB_ADMIN_URL/DATABASE_URL is not a valid URL'); }
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+    throw new Error('DB_ADMIN_URL/DATABASE_URL must use postgres:// or postgresql://');
+  }
+  return parsed;
+}
+
+function adminUser() {
+  return decodeURIComponent(adminConnection().username || DB_USER);
+}
+
+function postgresEnv(dbName) {
+  const admin = adminConnection();
+  return {
+    ...process.env,
+    PGHOST: admin.hostname,
+    PGPORT: admin.port || '5432',
+    PGUSER: decodeURIComponent(admin.username || DB_USER),
+    PGPASSWORD: decodeURIComponent(admin.password || ''),
+    PGDATABASE: dbName,
+    ...(admin.searchParams.get('sslmode') ? { PGSSLMODE: admin.searchParams.get('sslmode') } : {}),
+  };
 }
 
 // Create a fresh database with a dedicated owner role. Caller MUST
@@ -136,7 +167,7 @@ async function createDatabase(dbName) {
   // owns pg_toast tables pinned to pg_catalog, and postgres refuses
   // the whole REASSIGN when any system-required objects are involved
   // — see reassignUserObjectsTo for the full rationale.
-  await reassignUserObjectsTo(dbName, DB_USER, role).catch((err) => {
+  await reassignUserObjectsTo(dbName, adminUser(), role).catch((err) => {
     log.warn('db-manager', 'reassignUserObjectsTo skipped (likely no objects yet)', {
       dbName, err: err.message,
     });
@@ -298,7 +329,7 @@ async function cloneDatabase(sourceDb, targetDb) {
       });
     });
   }
-  await reassignUserObjectsTo(targetDb, DB_USER, targetRole).catch((err) => {
+  await reassignUserObjectsTo(targetDb, adminUser(), targetRole).catch((err) => {
     log.warn('db-manager', 'reassignUserObjectsTo from superuser failed', {
       targetDb, err: err.message,
     });
@@ -528,7 +559,7 @@ async function adoptExistingDatabase(dbName) {
   // schema migrations. Scoped to user schemas in the target DB only
   // (see reassignUserObjectsTo), so this can't reach into other DBs
   // in the cluster and never touches system catalogs.
-  await reassignUserObjectsTo(dbName, DB_USER, role);
+  await reassignUserObjectsTo(dbName, adminUser(), role);
 
   log.info('db-manager', 'Adoption complete', { dbName, role });
   return { password };
@@ -589,7 +620,8 @@ async function execInDb(sql, opts = {}) {
 }
 
 async function execInTarget(dbName, sql, opts = {}) {
-  const args = ['exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', dbName];
+  if (!SAFE_IDENT.test(dbName)) throw new Error(`execInTarget: unsafe dbName ${JSON.stringify(dbName)}`);
+  const args = ['-X', '-v', 'ON_ERROR_STOP=1'];
   if (opts.tuplesOnly) {
     // -A unaligned, -t tuples-only — produces clean newline-separated
     // values with no header/footer, suitable for parsing.
@@ -597,7 +629,10 @@ async function execInTarget(dbName, sql, opts = {}) {
   }
   args.push('-c', sql);
 
-  const { stdout, stderr } = await execFileAsync('docker', args, { timeout: 30000 });
+  const { stdout, stderr } = await execFileAsync('psql', args, {
+    timeout: 30000,
+    env: postgresEnv(dbName),
+  });
 
   if (stderr && !stderr.includes('NOTICE')) {
     throw new Error(stderr);
@@ -623,7 +658,7 @@ async function execInTarget(dbName, sql, opts = {}) {
 // failure is FATAL: not knowing what is private means we can't know what
 // is safe to skip, and guessing risks shipping prod rows into a preview.
 // Names are re-validated with SAFE_QUALIFIED_IDENT before they reach the
-// shell, same stance as truncatePrivateTables.
+// pg_dump argv, same stance as truncatePrivateTables.
 async function privateDataExclusions(sourceDb) {
   if (!SAFE_IDENT.test(sourceDb)) {
     throw new Error(`privateDataExclusions: unsafe identifier ${sourceDb}`);
@@ -691,8 +726,8 @@ SELECT n.nspname || '.' || c.relname
   return safe;
 }
 
-// Logical copy of one database into another via pg_dump | pg_restore,
-// run inside the postgres container. cloneDatabase uses this instead of
+// Logical copy of one database into another via a networked
+// pg_dump | pg_restore pipeline. cloneDatabase uses this instead of
 // CREATE DATABASE … TEMPLATE so the source can be copied while it is
 // actively serving traffic (see the note in cloneDatabase). Both names
 // are SAFE_IDENT-validated by the caller; we re-check defensively before
@@ -717,9 +752,8 @@ async function dumpRestore(sourceDb, targetDb, excludeData = []) {
   // reference the prod-side role). Comments are KEPT — the scrub passes
   // (truncatePrivateTables / scrubPrivateColumns) discover their targets
   // via the 'staging:private' COMMENTs, so --no-comments would silently
-  // disable redaction. `set -o pipefail` makes a pg_dump failure (e.g.
-  // an unreachable source) fail the whole pipeline instead of being
-  // masked by pg_restore's exit code.
+  // disable redaction. Both child exit codes are checked so a pg_dump
+  // failure cannot be masked by pg_restore's exit code.
   //
   // --exclude-table-data skips the COPY body for a table while still
   // dumping its schema, indexes, constraints, sequences and COMMENTs — so
@@ -727,26 +761,43 @@ async function dumpRestore(sourceDb, targetDb, excludeData = []) {
   // comments the scrub passes discover their targets from), it just
   // arrives empty. See privateDataExclusions for how the set is derived
   // and why it must include the FK closure.
-  const excludeFlags = excludeData
-    .map((qualified) => ` --exclude-table-data=${qualified}`)
-    .join('');
-  const pipeline =
-    'set -o pipefail; ' +
-    `pg_dump -U ${DB_USER} -Fc${excludeFlags} ${sourceDb} | ` +
-    `pg_restore -U ${DB_USER} --no-owner --no-privileges -d ${targetDb}`;
-
-  let stderr = '';
+  const dumpArgs = [
+    '-Fc',
+    ...excludeData.map((qualified) => `--exclude-table-data=${qualified}`),
+  ];
+  const dump = spawn('pg_dump', dumpArgs, {
+    env: postgresEnv(sourceDb), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const restore = spawn('pg_restore', ['--exit-on-error', '--no-owner', '--no-privileges'], {
+    env: postgresEnv(targetDb), stdio: ['pipe', 'ignore', 'pipe'],
+  });
+  dump.stdout.pipe(restore.stdin);
+  let dumpStderr = '';
+  let restoreStderr = '';
+  dump.stderr.on('data', (chunk) => { dumpStderr = (dumpStderr + chunk).slice(-64 * 1024); });
+  restore.stderr.on('data', (chunk) => { restoreStderr = (restoreStderr + chunk).slice(-64 * 1024); });
+  const timer = setTimeout(() => {
+    dump.kill('SIGKILL');
+    restore.kill('SIGKILL');
+  }, DUMP_RESTORE_TIMEOUT_MS);
+  const waitChild = (child) => new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  let dumpResult;
+  let restoreResult;
   try {
-    ({ stderr = '' } = await execFileAsync(
-      'docker',
-      ['exec', DB_CONTAINER, 'sh', '-c', pipeline],
-      { timeout: DUMP_RESTORE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }
-    ));
-  } catch (err) {
-    // Non-zero exit: a pg_dump failure (via pipefail) or a fatal
-    // pg_restore error. Surface the captured stderr for diagnosis.
-    const detail = (err.stderr || err.message || '').toString().slice(0, 2000);
-    throw new Error(`dumpRestore ${sourceDb} → ${targetDb} failed: ${detail}`);
+    [dumpResult, restoreResult] = await Promise.all([waitChild(dump), waitChild(restore)]);
+  } finally {
+    clearTimeout(timer);
+  }
+  const stderr = `${dumpStderr}\n${restoreStderr}`.trim();
+  if (dumpResult.code !== 0 || restoreResult.code !== 0) {
+    throw new Error(
+      `dumpRestore ${sourceDb} → ${targetDb} failed ` +
+      `(pg_dump=${dumpResult.code ?? dumpResult.signal}, pg_restore=${restoreResult.code ?? restoreResult.signal}): ` +
+      stderr.slice(0, 2000)
+    );
   }
 
   // pg_restore continues past per-object errors by default and prints a

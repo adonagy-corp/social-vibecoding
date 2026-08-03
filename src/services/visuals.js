@@ -23,6 +23,8 @@ const path = require('path');
 const log = require('./logger');
 const platformJwt = require('./platform-jwt');
 const docker = require('./docker');
+const kubernetes = require('./kubernetes');
+const applicationRuntime = require('./application-runtime');
 const github = require('./github');
 const caddy = require('./caddy');
 const prMetadata = require('./pr-metadata');
@@ -34,6 +36,14 @@ const { CAPTURE_MAX_PATHS, normalizeStoredPath, VIEWPORT_MOBILE } = require('./t
 const { getPool } = require('../db/pool');
 
 const CAPTURE_IMAGE = 'usernode-capture:latest';
+
+function captureRuntimeMode() {
+  const mode = process.env.CAPTURE_RUNTIME || process.env.APP_RUNTIME || 'docker';
+  if (!['docker', 'kubernetes'].includes(mode)) {
+    throw new Error(`Unsupported CAPTURE_RUNTIME=${mode}`);
+  }
+  return mode;
+}
 
 // Pixel frame for the phone-sized capture (#768, now automatic) — an
 // iPhone-14-class portrait viewport, passed per-target to the capture
@@ -248,6 +258,12 @@ function isUiAffecting(files) {
 // process anyway; Docker's layer cache makes the one build per boot fast.
 let _imagePromise = null;
 function ensureCaptureImage() {
+  if (captureRuntimeMode() === 'kubernetes') {
+    if (!(process.env.KUBERNETES_CAPTURE_IMAGE || '').includes('@sha256:')) {
+      return Promise.reject(new Error('KUBERNETES_CAPTURE_IMAGE must be configured with an immutable digest'));
+    }
+    return Promise.resolve();
+  }
   if (!_imagePromise) {
     const captureDir = path.join(__dirname, '../../capture');
     _imagePromise = docker.buildImage(captureDir, CAPTURE_IMAGE).catch((err) => {
@@ -1457,10 +1473,22 @@ async function captureForSession(config, session, app, commitHash, stagingResult
       return out.length ? out : ['/'];
     })();
 
-    const stagingName = `usernode-staging-${app.slug}--${session.id}`;
+    const kubernetesCapture = config.captureRuntime === 'kubernetes';
+    const appNamespace = config.kubernetes?.appNamespace || 'social-apps';
+    const stagingName = stagingResult?.runtimeName || session.staging_runtime_name
+      || `usernode-staging-${app.slug}--${session.id}`;
     const isSelfApp = app.slug === config.selfAppSlug;
-    const prodName = beforeContainerName(config, app.slug);
-    const prodRunning = (await docker.getContainerStatus(prodName)) === 'running';
+    const prodName = app.runtime_name || beforeContainerName(config, app.slug);
+    const prodRuntimeKind = app.runtime_kind || 'docker';
+    const prodRunning = (await applicationRuntime.status(config, {
+      runtimeKind: prodRuntimeKind, runtimeName: prodName,
+    })) === 'running';
+    const stagingOrigin = kubernetesCapture
+      ? `http://${stagingName}.${appNamespace}.svc.cluster.local:3000`
+      : `http://${stagingName}:3000`;
+    const prodOrigin = kubernetesCapture && prodRuntimeKind === 'kubernetes'
+      ? `http://${prodName}.${appNamespace}.svc.cluster.local:3000`
+      : `http://${prodName}:3000`;
 
     // Self-app "before" auth: the production platform never honours the
     // query token by design (replay protection — middleware/auth.js gates
@@ -1507,16 +1535,16 @@ async function captureForSession(config, session, app, commitHash, stagingResult
       const mobile = entry.viewport === VIEWPORT_MOBILE;
       const visitPath = isSelfApp ? selfAppHashPath(p) : p;
       const isFragmentTarget = visitPath.startsWith('/#');
-      const afterUrl = withToken(`http://${stagingName}:3000${visitPath}`, screenshotToken);
+      const afterUrl = withToken(`${stagingOrigin}${visitPath}`, screenshotToken);
       let beforeUrl = '';
       let beforeFallbackUrl = '';
       if (media && prodRunning) {
         if (isSelfApp) {
-          beforeUrl = `http://${prodName}:3000${visitPath}`;
-          if (p !== '/' && !isFragmentTarget) beforeFallbackUrl = `http://${prodName}:3000/`;
+          beforeUrl = `${prodOrigin}${visitPath}`;
+          if (p !== '/' && !isFragmentTarget) beforeFallbackUrl = `${prodOrigin}/`;
         } else {
-          beforeUrl = withToken(`http://${prodName}:3000${visitPath}`, screenshotToken);
-          if (p !== '/') beforeFallbackUrl = withToken(`http://${prodName}:3000/`, screenshotToken);
+          beforeUrl = withToken(`${prodOrigin}${visitPath}`, screenshotToken);
+          if (p !== '/') beforeFallbackUrl = withToken(`${prodOrigin}/`, screenshotToken);
         }
       }
       return {
@@ -1575,7 +1603,7 @@ async function captureForSession(config, session, app, commitHash, stagingResult
         path: t.path,
         // Tests sign as the view-only-admin so admin-gated check routes
         // render; screenshots (TARGETS) keep the non-admin captureToken.
-        url: withToken(`http://${stagingName}:3000${visitPath}`, testsToken),
+        url: withToken(`${stagingOrigin}${visitPath}`, testsToken),
         expectSelector: t.expectSelector || '',
         expectText: t.expectText || '',
         allowConsoleErrors: !!t.allowConsoleErrors,
@@ -1652,10 +1680,7 @@ async function captureForSession(config, session, app, commitHash, stagingResult
       const testsJson = JSON.stringify(tests);
       const testsViaStdin = testsJson.length > 90 * 1024;
       let res;
-      ({ stdout, ...res } = await docker.runOneShot(`usernode-capture-${session.id}`, {
-        image: CAPTURE_IMAGE,
-        stdinPayload: testsViaStdin ? testsJson : null,
-        env: {
+      const captureEnv = {
           // Multi-target protocol (#270). The container loops over these
           // sequentially and tags each shot frame with its index=. The
           // optional per-target `viewport` (#768) is the resolved pixel
@@ -1707,19 +1732,32 @@ async function captureForSession(config, session, app, commitHash, stagingResult
           TEST_CONCURRENCY,
           TEST_TIMEOUT_MS,
           TESTS_DEADLINE_MS,
-        },
-        // Eight concurrent Chromium pages need materially more than the
-        // 1g/1cpu one-shot default.
-        memory: CAPTURE_MEMORY,
-        cpus: CAPTURE_CPUS,
-        timeoutMs: RUN_TIMEOUT_MS,
-        maxBuffer: RUN_MAX_BUFFER,
+      };
+      if (kubernetesCapture) {
+        ({ stdout, ...res } = await kubernetes.runCaptureJob(config, {
+          sessionId: session.id,
+          env: captureEnv,
+          stdinPayload: testsViaStdin ? testsJson : null,
+          timeoutMs: RUN_TIMEOUT_MS,
+        }));
+      } else {
+        ({ stdout, ...res } = await docker.runOneShot(`usernode-capture-${session.id}`, {
+          image: CAPTURE_IMAGE,
+          env: captureEnv,
+          stdinPayload: testsViaStdin ? testsJson : null,
+          // Eight concurrent Chromium pages need materially more than the
+          // 1g/1cpu one-shot default.
+          memory: CAPTURE_MEMORY,
+          cpus: CAPTURE_CPUS,
+          timeoutMs: RUN_TIMEOUT_MS,
+          maxBuffer: RUN_MAX_BUFFER,
         // Improvement 5: the output protocol is a stream of independently
         // parseable frames, so a run killed at RUN_TIMEOUT_MS still carries
         // every frame it already emitted. Salvage them instead of losing the
         // whole proposal's screenshots to one slow page.
-        salvagePartial: true,
-      }));
+          salvagePartial: true,
+        }));
+      }
       runPartial = !!res.partial;
       runPartialReason = res.partialReason || '';
       if (runPartial) {

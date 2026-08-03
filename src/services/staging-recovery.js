@@ -41,6 +41,17 @@ const log = require('./logger');
 // no config and makes the added parameter non-breaking.
 async function stagingNeedsRebuild(session, { config = null } = {}) {
   if (!session.staging_url) return true;
+  if (session.staging_runtime_kind === 'kubernetes') {
+    if (!session.staging_runtime_name) return true;
+    const applicationRuntime = require('./application-runtime');
+    const config = {
+      appRuntime: 'kubernetes',
+      kubernetes: { appNamespace: process.env.APP_NAMESPACE || 'social-apps' },
+    };
+    return (await applicationRuntime.status(config, {
+      runtimeKind: 'kubernetes', runtimeName: session.staging_runtime_name,
+    })) !== 'running';
+  }
   if (!session.staging_container_id) return true;
   const docker = require('./docker');
   const state = await docker.inspectContainer(session.staging_container_id);

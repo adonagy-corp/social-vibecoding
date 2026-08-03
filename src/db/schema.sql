@@ -577,6 +577,13 @@ ALTER TABLE apps ADD COLUMN IF NOT EXISTS locked BOOLEAN NOT NULL DEFAULT FALSE;
 -- get NULL for every row, which is correct (the staging container
 -- has no business connecting to other prod app DBs).
 ALTER TABLE apps ADD COLUMN IF NOT EXISTS db_password TEXT;
+-- Runtime-neutral deployment references. Docker's historical container_id
+-- stays populated in Docker mode; Kubernetes mode records the image digest,
+-- immutable kpack Build and namespaced workload separately.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS image_ref TEXT;
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS build_ref VARCHAR(253);
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS runtime_kind VARCHAR(32) NOT NULL DEFAULT 'docker';
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS runtime_name VARCHAR(253);
 
 -- Activity tracking (for home screen sort)
 CREATE TABLE IF NOT EXISTS app_activity (
@@ -697,6 +704,10 @@ CREATE INDEX IF NOT EXISTS idx_csm_session_model
 -- Migrations (idempotent)
 ALTER TABLE chat_session_messages ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
 ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS cc_session_id VARCHAR(64);
+ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS staging_image_ref TEXT;
+ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS staging_build_ref VARCHAR(253);
+ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS staging_runtime_kind VARCHAR(32);
+ALTER TABLE chat_sessions          ADD COLUMN IF NOT EXISTS staging_runtime_name VARCHAR(253);
 -- LLM-generated PR title shown alongside the PR number across the UI
 -- (dev chat, vote panel, status page). Nullable so old rows predate the
 -- auto-title feature and just fall back to showing "by <user>".

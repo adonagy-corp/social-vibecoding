@@ -15,6 +15,7 @@
 
 const log = require('./logger');
 const docker = require('./docker');
+const applicationRuntime = require('./application-runtime');
 const dbManager = require('./db-manager');
 const appSecrets = require('./app-secrets');
 const appLlmEnv = require('./app-llm-env');
@@ -39,7 +40,10 @@ async function runExistingImage(config, app) {
   }
 
   const containerName = `usernode-app-${app.slug}`;
-  const imageName = `usernode-app-${app.slug}:latest`;
+  const imageName = applicationRuntime.mode(config) === 'kubernetes'
+    ? app.image_ref
+    : `usernode-app-${app.slug}:latest`;
+  if (!imageName) throw new Error(`runExistingImage: app ${app.slug} has no reusable image_ref`);
 
   const pool = getPool(config);
   const manifest = app.manifest_snapshot || { secrets: [] };
@@ -62,15 +66,16 @@ async function runExistingImage(config, app) {
     dbManager.appDbName(app.slug), app.db_password
   );
 
-  await docker.stopAndRemove(containerName).catch(() => {});
-
   // Same production env contract as app-creator / rebuildProduction —
   // a respawn must not silently drop the LLM-proxy pair (issue #34) or
   // the app-storage pair (#752).
   const llmEnv = await appLlmEnv.productionLlmEnv(pool, app.id);
   const storageEnv = await appStorageEnv.productionStorageEnv(pool, app.id);
-  const containerId = await docker.runContainer(containerName, {
-    image: imageName,
+  const deployed = await applicationRuntime.deploy(config, {
+    app,
+    environment: 'production',
+    imageRef: imageName,
+    dockerName: containerName,
     env: {
       DATABASE_URL: dbUrl,
       ...appIdentityEnv(app, config),
@@ -80,10 +85,9 @@ async function runExistingImage(config, app) {
       ...storageEnv,
       ...merge.env,
     },
-    port: 3000,
   });
 
-  return containerId;
+  return deployed.runtimeName;
 }
 
 async function respawnAppContainer(config, app) {
@@ -107,16 +111,17 @@ async function respawnAppContainer(config, app) {
   // app to block platform boot. If it fails to come up the operator
   // gets a warning in the logs and the existing /redeploy + drift
   // poller + app-heal watchdog paths will repair it.
-  await docker.waitForHealthy(containerName, 3000, '/health').catch((err) => {
+  if (applicationRuntime.mode(config) === 'docker') await docker.waitForHealthy(containerName, 3000, '/health').catch((err) => {
     log.warn('app-respawn', 'Container did not become healthy after respawn', {
       slug: app.slug, err: err.message,
     });
   });
 
   const pool = getPool(config);
+  const runtimeKind = applicationRuntime.mode(config);
   await pool.query(
-    'UPDATE apps SET container_id = $1 WHERE id = $2',
-    [containerId, app.id]
+    `UPDATE apps SET container_id = $1, runtime_kind = $2, runtime_name = $3 WHERE id = $4`,
+    [runtimeKind === 'docker' ? containerId : null, runtimeKind, containerId, app.id]
   );
 
   log.info('app-respawn', 'App respawned', { slug: app.slug, containerId });

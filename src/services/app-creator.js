@@ -1,6 +1,7 @@
 const log = require('./logger');
 const github = require('./github');
 const docker = require('./docker');
+const applicationRuntime = require('./application-runtime');
 const caddy = require('./caddy');
 const dbManager = require('./db-manager');
 const appManifest = require('./app-manifest');
@@ -294,11 +295,14 @@ async function finalizeDeploy(config, { appId, name, slug, tempDir, dbUrl, repoU
       return;
     }
 
-    await docker.buildImage(tempDir, imageName);
+    const build = await applicationRuntime.build(config, {
+      app: { id: appId, slug, repo_url: repoUrl },
+      revision: mainSha,
+      environment: 'production',
+      sourceDir: tempDir,
+      dockerImage: imageName,
+    });
     await docker.execFileAsync('rm', ['-rf', tempDir]).catch(() => {});
-
-    // 4. Remove any existing container with the same name
-    await docker.stopAndRemove(containerName).catch(() => {});
 
     // 5. Run the container. Production containers additionally get the
     // LLM-proxy env pair (URL + per-app token, generated lazily here on
@@ -307,8 +311,11 @@ async function finalizeDeploy(config, { appId, name, slug, tempDir, dbUrl, repoU
     const llmEnv = await appLlmEnv.productionLlmEnv(pool, appId);
     // Likewise the app-storage env pair (#752) — production only.
     const storageEnv = await appStorageEnv.productionStorageEnv(pool, appId);
-    const containerId = await docker.runContainer(containerName, {
-      image: imageName,
+    const deployed = await applicationRuntime.deploy(config, {
+      app: { id: appId, slug },
+      environment: 'production',
+      imageRef: build.imageRef,
+      dockerName: containerName,
       env: {
         DATABASE_URL: dbUrl,
         ...appIdentityEnv({ id: appId }, config),
@@ -318,25 +325,8 @@ async function finalizeDeploy(config, { appId, name, slug, tempDir, dbUrl, repoU
         ...storageEnv,
         ...merge.env,
       },
-      port: 3000,
     });
-
-    // 6. Wait for health
-    await docker.waitForHealthy(containerName, 3000, '/health');
-
-    // 7. No Caddy route to register — the wildcard site maps
-    // `<slug>.<domain>` to `containerName` (usernode-app-<slug>) and
-    // issues TLS on-demand. See Caddyfile + services/caddy.js.
-    const hostname = caddy.productionHostname(slug);
-
-    // 8. Determine the app's accessible URL
-    // See routes/apps.js for why we don't key off DOCKER_NETWORK anymore.
-    const isLocalDev = process.env.NODE_ENV === 'development' || process.env.USERNODE_LOCAL_DEV === '1';
-    let appUrl = `https://${hostname}`;
-    if (isLocalDev) {
-      const hostPort = await docker.getHostPort(containerName, 3000);
-      if (hostPort) appUrl = `http://localhost:${hostPort}`;
-    }
+    const { hostname, url: appUrl } = deployed;
 
     // 9. Update app status. last_deploy_at is bumped here so the home-
     // card "updated Xt ago" reflects the moment the prod container
@@ -344,10 +334,13 @@ async function finalizeDeploy(config, { appId, name, slug, tempDir, dbUrl, repoU
     // last_failure clears on every successful deploy (#416) so a stale
     // failure record can't outlive the retry that fixed it.
     await pool.query(
-      `UPDATE apps SET status = $1, container_id = $2, main_sha = $3, last_deploy_at = NOW(),
-                       last_failure = NULL
-       WHERE id = $4`,
-      ['running', containerId, mainSha || null, appId]
+      `UPDATE apps SET status = $1, container_id = $2, main_sha = $3,
+                       image_ref = $4, build_ref = $5, runtime_kind = $6,
+                       runtime_name = $7, last_deploy_at = NOW(), last_failure = NULL
+       WHERE id = $8`,
+      ['running', deployed.runtimeKind === 'docker' ? deployed.runtimeName : null,
+       mainSha || null, build.imageRef, build.buildRef, deployed.runtimeKind,
+       deployed.runtimeName, appId]
     );
 
     pushAppStatusUpdate({ id: appId, slug, status: 'running', url: appUrl });

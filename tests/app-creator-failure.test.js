@@ -34,6 +34,7 @@ function loadAppCreator({ dockerStubs = {}, ws = {}, githubStubs = {} } = {}) {
     logger: require.resolve('../src/services/logger'),
     github: require.resolve('../src/services/github'),
     docker: require.resolve('../src/services/docker'),
+    applicationRuntime: require.resolve('../src/services/application-runtime'),
     caddy: require.resolve('../src/services/caddy'),
     dbManager: require.resolve('../src/services/db-manager'),
     appManifest: require.resolve('../src/services/app-manifest'),

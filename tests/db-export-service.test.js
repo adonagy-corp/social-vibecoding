@@ -27,6 +27,8 @@ const { EventEmitter, Readable } = require('node:stream');
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 
+process.env.DATABASE_URL ||= 'postgres://usernode:test@db.example.test:5432/usernode';
+
 const dbExport = require('../src/services/db-export');
 
 // ── Fakes ────────────────────────────────────────────────────────────
@@ -186,14 +188,16 @@ test('pg_dump is invoked as argv — plain SQL, no shell anywhere', async () => 
   child.exit(0);
   await p;
 
-  assert.equal(seen.cmd, 'docker');
+  assert.equal(seen.cmd, 'pg_dump');
   assert.ok(Array.isArray(seen.args), 'args is an argv array, not a command string');
   assert.deepEqual(seen.args, [
-    'exec', dbExport.DB_CONTAINER, 'pg_dump', '-U', dbExport.DB_USER,
     '-Fp', '--no-owner', '--no-privileges', '--no-password',
     ...dbExport.EXCLUDED_TABLE_DATA.map((table) => `--exclude-table-data=${table}`),
     'usernode',
   ]);
+  assert.equal(seen.opts.env.PGDATABASE, 'usernode');
+  assert.equal(seen.opts.env.PGHOST, 'db.example.test');
+  assert.equal(seen.opts.env.PGPASSWORD, 'test');
   assert.ok(!seen.args.includes('-Fc'), 'the custom format is gone — this is plain SQL');
   // The gzip step is a Node stream, NOT a shell pipeline: nothing may be
   // spliced into a shell on a user-triggerable path.
@@ -369,10 +373,10 @@ test('a spawn failure resolves rather than rejecting', async () => {
   const res = fakeRes();
   const out = await dbExport.runExport({
     dbName: 'usernode', res, filename: 'd.sql.gz',
-    spawnFn: () => { throw new Error('docker not found'); },
+    spawnFn: () => { throw new Error('pg_dump not found'); },
   });
   assert.equal(out.status, 'failed');
-  assert.match(out.error, /docker not found/);
+  assert.match(out.error, /pg_dump not found/);
 });
 
 test('backpressure pauses the child instead of buffering the dump', async () => {

@@ -2508,11 +2508,20 @@ function appRoutes(config) {
       if (!rows.length) return res.status(404).json({ error: 'App not found' });
       const app = rows[0];
 
-      // Teardown container if running
-      if (app.container_id) {
-        const docker = require('../services/docker');
-        await docker.stopAndRemove(app.container_id).catch(() => {});
-        await docker.stopAndRemove(`usernode-app-${app.slug}`).catch(() => {});
+      // Teardown through the backend that owns this app. Historical rows
+      // without runtime_kind/runtime_name remain Docker-compatible.
+      if (app.runtime_name || app.container_id) {
+        const applicationRuntime = require('../services/application-runtime');
+        await applicationRuntime.remove(config, {
+          runtimeKind: app.runtime_kind || 'docker',
+          runtimeName: app.runtime_name || app.container_id,
+          appId: app.id,
+        }, { deleteBuilds: app.runtime_kind === 'kubernetes' }).catch(() => {});
+        if (!app.runtime_kind || app.runtime_kind === 'docker') {
+          await applicationRuntime.remove(config, {
+            runtimeKind: 'docker', runtimeName: `usernode-app-${app.slug}`,
+          }).catch(() => {});
+        }
       }
 
       // No Caddy route to remove — the wildcard site maps hostnames to

@@ -39,6 +39,7 @@
 
 const log = require('./logger');
 const docker = require('./docker');
+const applicationRuntime = require('./application-runtime');
 const { getPool } = require('../db/pool');
 
 const FIRST_PASS_DELAY_MS = 30_000;
@@ -240,8 +241,33 @@ async function checkAndHealOne(config, pool, app, { probeRunning = false } = {})
     }
   }
 
-  const name = containerName(app.slug);
-  const state = await docker.getContainerStatus(name);
+  const name = app.runtime_name || containerName(app.slug);
+  const runtimeRef = { runtimeKind: app.runtime_kind || 'docker', runtimeName: name };
+  const state = await applicationRuntime.status(config, runtimeRef);
+
+  if (runtimeRef.runtimeKind === 'kubernetes') {
+    if (state === 'running') return { status: 'healthy', slug: app.slug };
+    if (Date.now() - (healAttempts.get(app.slug) || 0) < cooldownMs(config)) {
+      return { status: 'cooldown', slug: app.slug };
+    }
+    healAttempts.set(app.slug, Date.now());
+    inFlight.add(app.slug);
+    try {
+      if (state !== 'not_found') {
+        await applicationRuntime.restart(config, runtimeRef);
+        healAttempts.delete(app.slug);
+        return { status: 'restarted', slug: app.slug };
+      }
+      const recovered = await recoverFromScratch(config, pool, app);
+      healAttempts.delete(app.slug);
+      return { status: recovered, slug: app.slug };
+    } catch (err) {
+      log.error('app-heal', 'Kubernetes heal failed', { slug: app.slug, err: err.message });
+      return { status: 'heal_failed', slug: app.slug, error: err.message };
+    } finally {
+      inFlight.delete(app.slug);
+    }
+  }
 
   if (state === 'running') {
     restartingStreak.delete(app.slug);

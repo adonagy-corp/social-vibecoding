@@ -329,7 +329,10 @@ async function rollOne(config, pool, app) {
   const deploy = appDeployStatus.read(app.slug);
   if (deploy && deploy.deploying) return { outcome: 'skipped_deploying' };
 
-  const hasImage = await docker.imageExists(imageName).catch(() => false);
+  const kubernetesMode = config.appRuntime === 'kubernetes';
+  const hasImage = kubernetesMode
+    ? !!app.image_ref
+    : await docker.imageExists(imageName).catch(() => false);
 
   if (!hasImage) {
     // Fallback: the cheap path needs an image on the host. Deliberately
@@ -393,6 +396,15 @@ async function rollOne(config, pool, app) {
       if (!containerId) return { outcome: 'skipped_missing_secrets' };
 
       try {
+        if (kubernetesMode) {
+          const { rowCount } = await pool.query(
+            `UPDATE apps SET container_id = NULL, runtime_kind = 'kubernetes',
+               runtime_name = $1, last_deploy_at = NOW() WHERE id = $2`,
+            [containerId, app.id]
+          );
+          if (!rowCount) return { outcome: 'skipped_deleted' };
+          return { outcome: 'rolled' };
+        }
         await docker.waitForHealthy(containerName, 3000, '/health', 10);
       } catch (err) {
         failedForPill = true;

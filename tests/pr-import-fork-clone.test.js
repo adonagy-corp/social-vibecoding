@@ -43,6 +43,7 @@ function loadStaging({ gitFail = null } = {}) {
   const ids = {
     logger: require.resolve('../src/services/logger'),
     docker: require.resolve('../src/services/docker'),
+    applicationRuntime: require.resolve('../src/services/application-runtime'),
     caddy: require.resolve('../src/services/caddy'),
     dbManager: require.resolve('../src/services/db-manager'),
     github: require.resolve('../src/services/github'),
@@ -96,6 +97,10 @@ function loadStaging({ gitFail = null } = {}) {
     connectionUrl: () => 'postgres://x',
   });
 
+  // visuals.js is loaded by this test file too and may already have loaded
+  // application-runtime with the real docker module. Reload the dispatcher
+  // after installing the docker stub so staging remains fully isolated.
+  delete require.cache[ids.applicationRuntime];
   delete require.cache[ids.subject];
   const subject = require(ids.subject);
   const restore = () => {

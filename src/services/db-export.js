@@ -12,15 +12,9 @@
 // gets the size back (SQL text compresses hard; `-Fc`'s own zlib pass is
 // what we're replacing, not adding to).
 //
-// WHY IT SHELLS OUT: the platform image (Dockerfile) is node:22-alpine +
-// `docker-cli git` — there is NO postgresql-client inside this container,
-// so `pg_dump` is not on our PATH and never will be. What we DO have is
-// the host docker socket bind-mounted into the `usernode` service, and a
-// `usernode-db` container (postgres:17-alpine) that ships pg_dump. That's
-// the same mechanism db-manager.js `dumpRestore()` already uses for every
-// staging clone, and the same shape as scripts/pull-remote-db.sh. So the
-// export runs `docker exec <db container> pg_dump …` and streams the
-// bytes straight through to the HTTP response.
+// WHY IT SHELLS OUT: pg_dump is the canonical streaming dump client and
+// is installed in the platform image. It connects through DATABASE_URL (or
+// DB_ADMIN_URL) over the network; it never enters the database container.
 //
 // TWO RULES THAT ARE NOT OPTIONAL:
 //
@@ -49,9 +43,6 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const log = require('./logger');
 
-// Same defaults db-manager.js uses. Compose sets DB_CONTAINER=usernode-db;
-// the fallback only matters for a fork that never sets it.
-const DB_CONTAINER = process.env.DB_CONTAINER || 'project-usernode-db';
 const DB_USER = process.env.DB_USER || 'usernode';
 
 // Same guard db-manager.js applies to every database identifier.
@@ -105,18 +96,34 @@ const EXCLUDED_TABLE_DATA = Object.freeze([
 
 // ── Environment ───────────────────────────────────────────────────────
 
-// Staging previews must never be able to export. Three layers guard it
-// (see the spec): staging containers don't get the docker socket at all,
-// this server-side check, and a disabled button driven off the capability
-// probe. This is a DELIBERATE exception to the "never gate features on
+// Staging previews must never be able to export. The server-side check and
+// disabled capability keep the endpoint unavailable even though database
+// administration now uses a normal network connection. Kubernetes previews
+// additionally receive only their own app database URL, never DB_ADMIN_URL.
+// This is a DELIBERATE exception to the "never gate features on
 // USERNODE_ENV" convention in src/prompts/app-conventions.md, and it must
 // stay: the self-staging auth path (middleware/auth.js) hands out a real
 // session for a cloned `users` row that kept is_admin, so an admin
 // session is trivially reachable in a preview — and a preview must not be
-// able to `docker exec` into the production database. Do not "fix" this
-// by deleting the check; the client stays env-literal-free instead.
+// able to export any database. Do not "fix" this by deleting the check; the
+// client stays env-literal-free instead.
 function isStaging() {
   return process.env.USERNODE_ENV === 'staging';
+}
+
+function postgresEnv(dbName) {
+  const value = process.env.DB_ADMIN_URL || process.env.DATABASE_URL;
+  if (!value) throw new Error('DB_ADMIN_URL or DATABASE_URL is required');
+  const url = new URL(value);
+  return {
+    ...process.env,
+    PGHOST: url.hostname,
+    PGPORT: url.port || '5432',
+    PGUSER: decodeURIComponent(url.username || DB_USER),
+    PGPASSWORD: decodeURIComponent(url.password || ''),
+    PGDATABASE: dbName,
+    ...(url.searchParams.get('sslmode') ? { PGSSLMODE: url.searchParams.get('sslmode') } : {}),
+  };
 }
 
 // ── Target database ───────────────────────────────────────────────────
@@ -141,10 +148,10 @@ function parseDbName(databaseUrl) {
 }
 
 // Resolve (and validate) what we would dump. Returns
-// { dbName, container, dbUser, reason } — dbName is null when we can't
+// { dbName, dbUser, reason } — dbName is null when we can't
 // safely export, with `reason` explaining why.
 function resolveTargetDb(config) {
-  const base = { dbName: null, container: DB_CONTAINER, dbUser: DB_USER, reason: null };
+  const base = { dbName: null, dbUser: DB_USER, reason: null };
   const parsed = parseDbName(config && config.databaseUrl);
   if (!parsed) return { ...base, reason: 'no_database_url' };
   if (!SAFE_IDENT.test(parsed)) {
@@ -231,8 +238,7 @@ function _resetTickets() { _tickets.clear(); }
 // ── The dump itself ───────────────────────────────────────────────────
 
 // Stream
-// `docker exec <container> pg_dump -U <user> -Fp --no-owner --no-privileges
-//  --no-password <db>`
+// `pg_dump -Fp --no-owner --no-privileges --no-password`
 // through an in-process gzip into `res`. Always resolves (never rejects)
 // with { status, bytesSent, rawBytes, error }, where status is one of
 // 'completed' | 'failed' | 'cancelled'. `bytesSent` is COMPRESSED bytes
@@ -263,7 +269,6 @@ function runExport({ dbName, res, filename, onStart, spawnFn }) {
     // pg_dump's default, but it is spelled out so the file format this
     // route promises is visible at the call site.
     const args = [
-      'exec', DB_CONTAINER, 'pg_dump', '-U', DB_USER,
       '-Fp', '--no-owner', '--no-privileges', '--no-password',
       ...EXCLUDED_TABLE_DATA.map((table) => `--exclude-table-data=${table}`),
       dbName,
@@ -271,7 +276,9 @@ function runExport({ dbName, res, filename, onStart, spawnFn }) {
 
     let child;
     try {
-      child = (spawnFn || spawn)('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = (spawnFn || spawn)('pg_dump', args, {
+        stdio: ['ignore', 'pipe', 'pipe'], env: postgresEnv(dbName),
+      });
     } catch (err) {
       resolve({ status: 'failed', bytesSent: 0, rawBytes: 0, error: err.message });
       return;
@@ -355,8 +362,7 @@ function runExport({ dbName, res, filename, onStart, spawnFn }) {
     });
 
     // pg_dump → gzip. Written by hand rather than .pipe() so the child's
-    // exit (not its stdout EOF) is what flushes the compressor: `docker
-    // exec` can leave the pipe open a beat past the process it ran.
+    // exit (not its stdout EOF) is what flushes the compressor.
     child.stdout.on('data', (chunk) => {
       if (clientGone || settled) return;
       rawBytes += chunk.length;
@@ -458,7 +464,6 @@ function runExport({ dbName, res, filename, onStart, spawnFn }) {
 }
 
 module.exports = {
-  DB_CONTAINER,
   DB_USER,
   DB_EXPORT_TIMEOUT_MS,
   EXPORT_CONTENT_TYPE,
