@@ -1,0 +1,107 @@
+{{- if and .Values.enabled .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-default-deny
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-platform
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: platform
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 3000}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: postgresql
+      ports: [{protocol: TCP, port: 5432}]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to: [{ipBlock: {cidr: 0.0.0.0/0}}]
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-migration
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: migration
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: postgresql
+      ports: [{protocol: TCP, port: 5432}]
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgresql
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: platform
+        - podSelector:
+            matchLabels:
+              {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: migration
+      ports: [{protocol: TCP, port: 5432}]
+{{- if .Values.networkPolicy.ciliumApiServerEgress }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-kube-apiserver
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: platform
+  egress:
+    - toEntities: [kube-apiserver]
+{{- end }}
+{{- end }}

@@ -1,0 +1,112 @@
+enabled: false
+
+nameOverride: ""
+fullnameOverride: social-vibecoding
+
+imagePullSecrets: []
+
+# Populated in values.release.yaml by the image build workflow before the
+# immutable OCI chart is packaged. Cluster values must not override it.
+release:
+  sourceRevision: ""
+
+platform:
+  replicas: 1
+  image:
+    repository: ghcr.io/replace-me/social-vibecoding-platform
+    digest: ""
+    pullPolicy: IfNotPresent
+  workerImage:
+    repository: ghcr.io/replace-me/social-vibecoding-worker
+    digest: ""
+  captureImage:
+    repository: ghcr.io/replace-me/social-vibecoding-capture
+    digest: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "4"
+      memory: 3Gi
+      ephemeral-storage: 4Gi
+  tmpSizeLimit: 2Gi
+
+postgresql:
+  image:
+    repository: postgres
+    tag: 17-bookworm
+    digest: sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+    pullPolicy: IfNotPresent
+  database: usernode
+  applicationDatabase: app_usernode_2d5619
+  username: usernode
+  storage:
+    size: 50Gi
+    storageClassName: openebs-lvm-retain
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  sharedMemorySizeLimit: 1Gi
+
+migration:
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+
+config:
+  publicHost: social.platform.example.invalid
+  generatedAppDomain: apps.platform.example.invalid
+  platformRepository: https://github.com/replace-me/social-vibecoding
+  nodeRpcUrl: http://replace-me.invalid:3000
+  internalUrl: http://social-vibecoding.social-platform.svc.cluster.local:3000
+  logLevel: INFO
+  workerMemory: 2g
+  workerCpus: "2"
+
+secrets:
+  create: false
+  existingSecret: social-vibecoding
+  databasePassword: ""
+  adminUsername: ""
+  adminPassword: ""
+  sessionSecret: ""
+  dataEncryptionKey: ""
+  iframeJwtPrivateKey: ""
+  iframeJwtPublicKey: ""
+  workerJwtSecret: ""
+  edgeJwtSecret: ""
+  githubAppId: ""
+  githubPrivateKey: ""
+  anthropicApiKey: ""
+
+ingress:
+  enabled: true
+  className: cilium
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-public
+    ingress.cilium.io/loadbalancer-mode: shared
+  tls:
+    enabled: true
+    secretName: social-vibecoding-tls
+
+networkPolicy:
+  enabled: true
+  ciliumApiServerEgress: true
+
+podDisruptionBudget:
+  enabled: true

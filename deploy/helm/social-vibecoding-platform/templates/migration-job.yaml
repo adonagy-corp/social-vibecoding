@@ -1,0 +1,56 @@
+{{- if .Values.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-migrate
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.migration.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "social-vibecoding-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "social-vibecoding-platform.fullname" . }}-migrator
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "social-vibecoding-platform.image" .Values.platform.image | quote }}
+          imagePullPolicy: {{ .Values.platform.image.pullPolicy }}
+          command: ["node", "scripts/migrate-kubernetes.js"]
+          securityContext:
+            {{- include "social-vibecoding-platform.containerSecurityContext" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: {{ include "social-vibecoding-platform.secretName" . }}
+          env:
+            - {name: NODE_ENV, value: production}
+            - {name: APP_RUNTIME, value: kubernetes}
+            - {name: WORKER_RUNTIME, value: kubernetes}
+            - {name: CAPTURE_RUNTIME, value: kubernetes}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 512Mi}}
+{{- end }}

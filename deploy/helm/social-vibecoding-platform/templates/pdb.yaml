@@ -1,0 +1,27 @@
+{{- if and .Values.enabled .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-platform
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: platform
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgresql
+{{- end }}

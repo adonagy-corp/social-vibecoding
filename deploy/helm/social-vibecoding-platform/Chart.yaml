@@ -1,0 +1,8 @@
+apiVersion: v2
+name: social-vibecoding-platform
+description: Social vibecoding platform and PostgreSQL workload
+type: application
+version: 0.1.0
+appVersion: "development"
+annotations:
+  org.opencontainers.image.source: https://github.com/adonagy-corp/social-vibecoding

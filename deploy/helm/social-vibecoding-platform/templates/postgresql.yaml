@@ -1,0 +1,116 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "social-vibecoding-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+  labels:
+    {{- include "social-vibecoding-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  serviceName: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      labels:
+        {{- include "social-vibecoding-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgresql
+    spec:
+      serviceAccountName: {{ include "social-vibecoding-platform.fullname" . }}-postgresql
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgresql
+          image: {{ include "social-vibecoding-platform.postgresqlImage" .Values.postgresql.image | quote }}
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          securityContext:
+            {{- include "social-vibecoding-platform.containerSecurityContext" . | nindent 12 }}
+          env:
+            - {name: POSTGRES_DB, value: {{ .Values.postgresql.database | quote }}}
+            - {name: POSTGRES_USER, value: {{ .Values.postgresql.username | quote }}}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "social-vibecoding-platform.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - {name: postgresql, containerPort: 5432, protocol: TCP}
+          startupProbe:
+            exec: {command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}, "-d", {{ .Values.postgresql.database | quote }}]}
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}, "-d", {{ .Values.postgresql.database | quote }}]}
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec: {command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}, "-d", {{ .Values.postgresql.database | quote }}]}
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: run, mountPath: /var/run/postgresql}
+            - {name: tmp, mountPath: /tmp}
+            - {name: dshm, mountPath: /dev/shm}
+      volumes:
+        - {name: run, emptyDir: {sizeLimit: 64Mi}}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgresql.sharedMemorySizeLimit | quote }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "social-vibecoding-platform.labels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.postgresql.storage.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.storage.size | quote }}
+{{- end }}
