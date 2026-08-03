@@ -1084,7 +1084,11 @@ async function start() {
   // to the lock_timeout retry INSIDE migrate() (applySchemaWithLockRetry):
   // this serializes the two colors against each other; that one survives
   // lock contention with pg_dump'ing staging clones.
-  await withMigrationLock(getPool(config), () => migrate(config));
+  // Kubernetes runs the same migration through a bounded pre-deploy Job;
+  // Docker/single-server mode keeps the advisory-lock boot migration.
+  if (process.env.RUN_MIGRATIONS_ON_STARTUP !== 'false') {
+    await withMigrationLock(getPool(config), () => migrate(config));
+  }
   await mobilePush.initialize(config);
   await github.init(config);
   // Configure the collection kill switch even on deployments with no

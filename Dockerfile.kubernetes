@@ -1,0 +1,14 @@
+FROM node:22-alpine
+
+# Kubernetes mode talks to the Kubernetes and PostgreSQL APIs over the
+# network. It deliberately contains no Docker CLI or container-runtime tools.
+RUN apk add --no-cache git postgresql-client
+
+WORKDIR /app
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --chown=node:node . .
+
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]
