@@ -65,5 +65,8 @@ capabilities:
   {{- if empty .Values.config.domain -}}
     {{- fail "config.domain is required" -}}
   {{- end -}}
+  {{- if empty .Values.clusterDomain -}}
+    {{- fail "clusterDomain is required" -}}
+  {{- end -}}
 {{- end -}}
 {{- end -}}

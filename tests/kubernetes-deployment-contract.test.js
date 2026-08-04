@@ -58,6 +58,22 @@ test('PostgreSQL claim template uses only release-stable labels', () => {
   assert.doesNotMatch(claimTemplate, /social-vibecoding-platform\.labels/);
 });
 
+test('generated app database URLs use cross-namespace PostgreSQL DNS', () => {
+  const secret = read('deploy/helm/social-vibecoding-platform/templates/secret.yaml');
+  assert.match(secret, /-postgresql\.%s\.svc\.%s:5432/);
+  assert.match(secret, /\.Release\.Namespace/);
+  assert.match(secret, /\.Values\.clusterDomain/);
+});
+
+test('PostgreSQL ingress permits only runtime-managed generated app pods', () => {
+  const policy = read('deploy/helm/social-vibecoding-platform/templates/networkpolicy.yaml');
+  const postgresqlPolicy = policy.split('kind: NetworkPolicy')[4].split('---')[0];
+  assert.match(postgresqlPolicy, /databaseCallerNamespaces/);
+  assert.match(postgresqlPolicy, /app\.kubernetes\.io\/managed-by: social-vibecoding-runtime/);
+  assert.match(postgresqlPolicy, /app\.kubernetes\.io\/part-of: social-vibecoding/);
+  assert.match(postgresqlPolicy, /port: 5432/);
+});
+
 test('public platform ingress is restricted to the Cilium ingress identity', () => {
   const policy = read('deploy/helm/social-vibecoding-platform/templates/networkpolicy.yaml');
   const platformPolicy = policy.split('kind: NetworkPolicy')[2].split('---')[0];

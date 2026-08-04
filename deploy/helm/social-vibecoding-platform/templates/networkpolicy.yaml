@@ -91,6 +91,15 @@ spec:
             matchLabels:
               {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: migration
+        {{- range .Values.networkPolicy.databaseCallerNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: social-vibecoding-runtime
+              app.kubernetes.io/part-of: social-vibecoding
+        {{- end }}
       ports: [{protocol: TCP, port: 5432}]
 {{- if .Values.networkPolicy.ciliumApiServerEgress }}
 ---

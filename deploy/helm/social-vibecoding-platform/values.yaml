@@ -5,6 +5,10 @@ fullnameOverride: social-vibecoding
 
 imagePullSecrets: []
 
+# DNS suffix used for cross-namespace Service addresses. Keep this aligned
+# with the Kubernetes cluster's configured cluster domain.
+clusterDomain: cluster.local
+
 # Populated in values.release.yaml by the image build workflow before the
 # immutable OCI chart is packaged. Cluster values must not override it.
 release:
@@ -114,6 +118,10 @@ networkPolicy:
   internalCallerNamespaces:
     - social-apps
     - social-workers
+  # Generated applications connect directly to their dedicated PostgreSQL
+  # databases using per-database roles. Workers do not require database access.
+  databaseCallerNamespaces:
+    - social-apps
 
 podDisruptionBudget:
   enabled: true
