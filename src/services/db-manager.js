@@ -768,7 +768,11 @@ async function dumpRestore(sourceDb, targetDb, excludeData = []) {
   const dump = spawn('pg_dump', dumpArgs, {
     env: postgresEnv(sourceDb), stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const restore = spawn('pg_restore', ['--exit-on-error', '--no-owner', '--no-privileges'], {
+  // pg_restore does not infer "restore into a database" from PGDATABASE:
+  // without -d/--dbname it expects -f and exits before reading stdin. Keep
+  // the explicit target in argv as well as postgresEnv(targetDb), which
+  // provides the network credentials.
+  const restore = spawn('pg_restore', pgRestoreArgs(targetDb), {
     env: postgresEnv(targetDb), stdio: ['pipe', 'ignore', 'pipe'],
   });
   dump.stdout.pipe(restore.stdin);
@@ -816,6 +820,13 @@ async function dumpRestore(sourceDb, targetDb, excludeData = []) {
       sourceDb, targetDb, stderr: stderr.slice(0, 2000),
     });
   }
+}
+
+function pgRestoreArgs(targetDb) {
+  if (!SAFE_IDENT.test(targetDb)) {
+    throw new Error(`pgRestoreArgs: unsafe database name ${JSON.stringify(targetDb)}`);
+  }
+  return ['--exit-on-error', '--no-owner', '--no-privileges', '--dbname', targetDb];
 }
 
 async function truncatePrivateTables(targetDb) {
@@ -1032,4 +1043,5 @@ module.exports = {
   truncatePrivateTables,
   scrubPrivateColumns,
   privateDataExclusions,
+  pgRestoreArgs,
 };
