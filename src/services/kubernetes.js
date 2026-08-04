@@ -164,6 +164,15 @@ function podSecurityContext() {
   return { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } };
 }
 
+function nodePodSecurityContext() {
+  return {
+    ...podSecurityContext(),
+    runAsUser: 1000,
+    runAsGroup: 1000,
+    fsGroup: 1000,
+  };
+}
+
 function containerSecurityContext() {
   return { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, readOnlyRootFilesystem: false };
 }
@@ -328,7 +337,7 @@ async function ensureWorker(config, { sessionId, env }) {
         spec: {
           serviceAccountName: cfg.workerServiceAccount,
           automountServiceAccountToken: false,
-          securityContext: podSecurityContext(),
+          securityContext: nodePodSecurityContext(),
           containers: [{
             name: 'worker', image: cfg.workerImage, imagePullPolicy: 'IfNotPresent',
             envFrom: [{ secretRef: { name: secretName } }],
@@ -420,7 +429,7 @@ async function cloneWorkerVolume(config, sourceSessionId, targetSessionId) {
   const name = dnsName(`sv-worker-copy-${sourceSessionId}-${targetSessionId}-${Date.now().toString(36)}`);
   const podSpec = {
     restartPolicy: 'Never', serviceAccountName: cfg.workerServiceAccount, automountServiceAccountToken: false,
-    securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
+    securityContext: nodePodSecurityContext(),
     containers: [{ name: 'copy', image: cfg.workerImage, command: ['sh', '-c', 'cp -a /from/. /to/'], volumeMounts: [{ name: 'from', mountPath: '/from', readOnly: true }, { name: 'to', mountPath: '/to' }], securityContext: containerSecurityContext(), resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '1', memory: '1Gi' } } }],
     volumes: [{ name: 'from', persistentVolumeClaim: { claimName: sourcePvc, readOnly: true } }, { name: 'to', persistentVolumeClaim: { claimName: targetPvc } }],
   };
@@ -443,7 +452,7 @@ async function runCaptureJob(config, { sessionId, env, timeoutMs = 180000 }) {
   const name = dnsName(`sv-capture-s${sessionId}-${Date.now().toString(36)}`);
   const body = { apiVersion: 'batch/v1', kind: 'Job', metadata: { name, namespace, labels: labels({ sessionId, environment: 'capture' }) }, spec: {
     backoffLimit: 0, activeDeadlineSeconds: Math.ceil(timeoutMs / 1000), ttlSecondsAfterFinished: 3600,
-    template: { metadata: { labels: labels({ sessionId, environment: 'capture' }) }, spec: { restartPolicy: 'Never', serviceAccountName: cfg.workerServiceAccount, automountServiceAccountToken: false, securityContext: podSecurityContext(), containers: [{ name: 'capture', image: cfg.captureImage, imagePullPolicy: 'IfNotPresent', env: Object.entries(env || {}).map(([key, value]) => ({ name: key, value: String(value) })), resources: { requests: { cpu: '250m', memory: '512Mi', 'ephemeral-storage': '1Gi' }, limits: { cpu: '2', memory: '2Gi', 'ephemeral-storage': '4Gi' } }, securityContext: containerSecurityContext() }] } },
+    template: { metadata: { labels: labels({ sessionId, environment: 'capture' }) }, spec: { restartPolicy: 'Never', serviceAccountName: cfg.workerServiceAccount, automountServiceAccountToken: false, securityContext: nodePodSecurityContext(), containers: [{ name: 'capture', image: cfg.captureImage, imagePullPolicy: 'IfNotPresent', env: Object.entries(env || {}).map(([key, value]) => ({ name: key, value: String(value) })), resources: { requests: { cpu: '250m', memory: '512Mi', 'ephemeral-storage': '1Gi' }, limits: { cpu: '2', memory: '2Gi', 'ephemeral-storage': '4Gi' } }, securityContext: containerSecurityContext() }] } },
   } };
   const { batch, core } = getClients();
   await batch.createNamespacedJob({ namespace, body });

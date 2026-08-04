@@ -121,6 +121,15 @@ test('worker runtime reconciles a retained PVC, Secret and warm Deployment', asy
   assert.equal(pvc.spec.storageClassName, 'openebs-lvm-retain');
   const deployment = written.find((item) => item.kind === 'Deployment').body;
   assert.equal(deployment.spec.strategy.type, 'Recreate');
+  assert.deepEqual(
+    {
+      runAsNonRoot: deployment.spec.template.spec.securityContext.runAsNonRoot,
+      runAsUser: deployment.spec.template.spec.securityContext.runAsUser,
+      runAsGroup: deployment.spec.template.spec.securityContext.runAsGroup,
+      fsGroup: deployment.spec.template.spec.securityContext.fsGroup,
+    },
+    { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+  );
   assert.equal(
     deployment.spec.template.metadata.annotations['social.usernode.io/env-checksum'],
     kubernetes._envChecksumForTest({ WORKER_JWT: 'redacted' })
@@ -156,6 +165,9 @@ test('capture runtime uses a bounded Job and caps log retrieval', async () => {
   assert.equal(created.body.spec.activeDeadlineSeconds, 120);
   assert.equal(created.body.spec.ttlSecondsAfterFinished, 3600);
   assert.equal(created.body.spec.template.spec.automountServiceAccountToken, false);
+  assert.equal(created.body.spec.template.spec.securityContext.runAsUser, 1000);
+  assert.equal(created.body.spec.template.spec.securityContext.runAsGroup, 1000);
+  assert.equal(created.body.spec.template.spec.securityContext.fsGroup, 1000);
   assert.equal(logRequest.limitBytes, 64 * 1024 * 1024);
   assert.equal(result.stdout, 'result');
 });
