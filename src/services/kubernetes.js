@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const stream = require('stream');
 const k8s = require('@kubernetes/client-node');
 
@@ -41,6 +42,13 @@ function withSuffix(value, suffix, max = 63) {
   const cleanSuffix = `-${dnsName(suffix, max)}`;
   const base = dnsName(value, max - cleanSuffix.length);
   return `${base}${cleanSuffix}`;
+}
+
+function envChecksum(env) {
+  const entries = Object.entries(env || {})
+    .map(([key, value]) => [key, String(value)])
+    .sort(([left], [right]) => left.localeCompare(right));
+  return crypto.createHash('sha256').update(JSON.stringify(entries)).digest('hex');
 }
 
 function labels({ appId, sessionId, environment }) {
@@ -189,7 +197,10 @@ async function deployApplication(config, { app, environment, sessionId, imageRef
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
       selector: { matchLabels: selectorLabels },
       template: {
-        metadata: { labels: { ...resourceLabels, ...selectorLabels } },
+        metadata: {
+          labels: { ...resourceLabels, ...selectorLabels },
+          annotations: { 'social.usernode.io/env-checksum': envChecksum(env) },
+        },
         spec: {
           serviceAccountName: cfg.generatedAppServiceAccount,
           automountServiceAccountToken: false,
@@ -310,7 +321,10 @@ async function ensureWorker(config, { sessionId, env }) {
       selector: { matchLabels: selectorLabels },
       strategy: { type: 'Recreate' },
       template: {
-        metadata: { labels: { ...resourceLabels, ...selectorLabels } },
+        metadata: {
+          labels: { ...resourceLabels, ...selectorLabels },
+          annotations: { 'social.usernode.io/env-checksum': envChecksum(env) },
+        },
         spec: {
           serviceAccountName: cfg.workerServiceAccount,
           automountServiceAccountToken: false,
@@ -471,5 +485,5 @@ module.exports = {
   getApplicationLogs, restartApplication, deleteApplication, deleteBuilds, ensureWorker,
   runCaptureJob, execInWorker, _getClients: getClients,
   getWorkerStatus, deleteWorker, listWorkers, cloneWorkerVolume,
-  _setClientsForTest: setClientsForTest,
+  _setClientsForTest: setClientsForTest, _envChecksumForTest: envChecksum,
 };

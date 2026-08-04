@@ -75,6 +75,10 @@ test('application deploy reconciles Secret, Deployment, Service and Ingress with
   const deployment = written.find((item) => item.kind === 'Deployment').body;
   assert.equal(deployment.spec.template.spec.containers[0].image, 'ghcr.io/example/social-apps/demo@sha256:deadbeef');
   assert.equal(deployment.spec.template.spec.serviceAccountName, 'social-generated-app');
+  assert.equal(
+    deployment.spec.template.metadata.annotations['social.usernode.io/env-checksum'],
+    kubernetes._envChecksumForTest({ DATABASE_URL: 'postgres://redacted', PORT: '3000' })
+  );
   const ingress = written.find((item) => item.kind === 'Ingress').body;
   assert.equal(ingress.spec.ingressClassName, 'cilium');
   assert.equal(ingress.metadata.annotations['cert-manager.io/cluster-issuer'], 'letsencrypt-public');
@@ -117,7 +121,20 @@ test('worker runtime reconciles a retained PVC, Secret and warm Deployment', asy
   assert.equal(pvc.spec.storageClassName, 'openebs-lvm-retain');
   const deployment = written.find((item) => item.kind === 'Deployment').body;
   assert.equal(deployment.spec.strategy.type, 'Recreate');
+  assert.equal(
+    deployment.spec.template.metadata.annotations['social.usernode.io/env-checksum'],
+    kubernetes._envChecksumForTest({ WORKER_JWT: 'redacted' })
+  );
   assert.equal(deployment.spec.template.spec.volumes[0].persistentVolumeClaim.claimName, result.pvcName);
+});
+
+test('environment checksum is stable by key order and changes with secret values', () => {
+  const first = kubernetes._envChecksumForTest({ PORT: 3000, DATABASE_URL: 'postgres://one' });
+  const reordered = kubernetes._envChecksumForTest({ DATABASE_URL: 'postgres://one', PORT: '3000' });
+  const changed = kubernetes._envChecksumForTest({ DATABASE_URL: 'postgres://two', PORT: '3000' });
+  assert.equal(first, reordered);
+  assert.notEqual(first, changed);
+  assert.match(first, /^[a-f0-9]{64}$/);
 });
 
 test('capture runtime uses a bounded Job and caps log retrieval', async () => {
