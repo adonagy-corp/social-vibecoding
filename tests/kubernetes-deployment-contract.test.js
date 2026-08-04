@@ -32,3 +32,9 @@ test('migration command validates the target database identifier', () => {
   assert.equal(databaseName('postgres://user:pass@db:5432/app_usernode_2d5619'), 'app_usernode_2d5619');
   assert.throws(() => databaseName('postgres://user:pass@db:5432/bad-name'), /Unsafe database name/);
 });
+
+test('migration Job receives the canonical production origin', () => {
+  const migrationJob = read('deploy/helm/social-vibecoding-platform/templates/migration-job.yaml');
+  assert.match(migrationJob, /name: USERNODE_DOMAIN, value: \{\{ \.Values\.config\.domain \| quote \}\}/);
+  assert.match(migrationJob, /name: CLI_CANONICAL_ORIGIN, value: \{\{ printf "https:\/\/%s" \.Values\.config\.domain \| quote \}\}/);
+});
