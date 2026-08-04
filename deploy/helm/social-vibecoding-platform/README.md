@@ -16,6 +16,10 @@ rendered manually but are outside Argo's stable version constraint. Cluster
 configuration and SOPS-encrypted secrets remain in the infra repository and
 are applied as external Helm values.
 
+`config.domain` is the single canonical domain expected by the application.
+The platform is served at that hostname and generated applications use
+`<slug>.<domain>` (with staging hosts beneath the same wildcard).
+
 The OCI chart package must be public for unauthenticated Argo CD pulls. If it
 is kept private, Argo CD needs a read-only GHCR repository credential with OCI
 support enabled. Runtime image visibility is independent and may use the

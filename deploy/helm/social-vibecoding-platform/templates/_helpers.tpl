@@ -59,8 +59,11 @@ capabilities:
   {{- if and .Values.secrets.create (not (regexMatch "^[A-Za-z0-9._~-]+$" .Values.secrets.databasePassword)) -}}
     {{- fail "secrets.databasePassword must be non-empty and URL-safe" -}}
   {{- end -}}
-  {{- if or (empty .Values.config.publicHost) (empty .Values.config.generatedAppDomain) -}}
-    {{- fail "config.publicHost and config.generatedAppDomain are required" -}}
+  {{- if and .Values.secrets.create (or (empty .Values.secrets.githubAppId) (empty .Values.secrets.githubPrivateKey) (empty .Values.secrets.githubBotToken)) -}}
+    {{- fail "secrets.githubAppId, secrets.githubPrivateKey and secrets.githubBotToken are required when enabled=true" -}}
+  {{- end -}}
+  {{- if empty .Values.config.domain -}}
+    {{- fail "config.domain is required" -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

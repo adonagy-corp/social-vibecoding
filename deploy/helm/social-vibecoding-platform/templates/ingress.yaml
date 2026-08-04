@@ -13,11 +13,11 @@ spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
   {{- if .Values.ingress.tls.enabled }}
   tls:
-    - hosts: [{{ .Values.config.publicHost | quote }}]
+    - hosts: [{{ .Values.config.domain | quote }}]
       secretName: {{ .Values.ingress.tls.secretName | quote }}
   {{- end }}
   rules:
-    - host: {{ .Values.config.publicHost | quote }}
+    - host: {{ .Values.config.domain | quote }}
       http:
         paths:
           - path: /

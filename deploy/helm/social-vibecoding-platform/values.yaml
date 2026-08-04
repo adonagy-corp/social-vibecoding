@@ -69,8 +69,9 @@ migration:
       ephemeral-storage: 2Gi
 
 config:
-  publicHost: social.platform.example.invalid
-  generatedAppDomain: apps.platform.example.invalid
+  # Canonical platform host and generated-application suffix. Generated apps
+  # are addressed as <slug>.<domain>.
+  domain: social-vibecoding.example.invalid
   platformRepository: https://github.com/replace-me/social-vibecoding
   nodeRpcUrl: http://replace-me.invalid:3000
   internalUrl: http://social-vibecoding.social-platform.svc.cluster.local:3000
@@ -92,7 +93,9 @@ secrets:
   edgeJwtSecret: ""
   githubAppId: ""
   githubPrivateKey: ""
+  githubBotToken: ""
   anthropicApiKey: ""
+  anthropicAdminKey: ""
 
 ingress:
   enabled: true
