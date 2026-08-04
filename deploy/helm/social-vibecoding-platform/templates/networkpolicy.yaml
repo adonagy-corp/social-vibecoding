@@ -26,7 +26,13 @@ spec:
       app.kubernetes.io/component: platform
   policyTypes: [Ingress, Egress]
   ingress:
-    - ports: [{protocol: TCP, port: 3000}]
+    - from:
+        {{- range .Values.networkPolicy.internalCallerNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports: [{protocol: TCP, port: 3000}]
   egress:
     - to:
         - podSelector:
@@ -101,6 +107,11 @@ spec:
     matchLabels:
       {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: platform
+  ingress:
+    - fromEntities: [ingress]
+      toPorts:
+        - ports:
+            - {port: "3000", protocol: TCP}
   egress:
     - toEntities: [kube-apiserver]
 {{- end }}

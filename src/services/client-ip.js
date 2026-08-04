@@ -34,6 +34,7 @@ function forwardedClientIp(req) {
 
 function trustedProxyClientIp({
   hostname = '',
+  trustDirectPeer = false,
   lookup = dns.promises.lookup,
   refreshMs = DEFAULT_REFRESH_MS,
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
@@ -85,7 +86,15 @@ function trustedProxyClientIp({
   return async (req, _res, next) => {
     if (hostname && Date.now() >= refreshAfter) await refresh();
     const peer = socketIp(req);
-    const forwarded = trustedAddresses.has(peer) ? forwardedClientIp(req) : '';
+    // In Kubernetes this enables the ingress controller's forwarded address
+    // without resolving a proxy hostname (and without a Caddy sidecar).
+    // NetworkPolicy limits other direct peers to the app/worker namespaces;
+    // their normal internal calls carry no forwarding header.
+    // TODO: before opening the platform to untrusted app authors, split the
+    // ingress and internal listeners (or authenticate the proxy hop) so a
+    // generated app cannot deliberately forge a single forwarding header.
+    const trustedPeer = trustedAddresses.has(peer) || (trustDirectPeer && Boolean(peer));
+    const forwarded = trustedPeer ? forwardedClientIp(req) : '';
     req.clientIp = forwarded || peer;
     next();
   };

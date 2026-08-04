@@ -128,6 +128,7 @@ function canonicalOpenRouterApiBase(value, source) {
 
 function load() {
   const staging = IS_STAGING();
+  const appRuntime = process.env.APP_RUNTIME || 'docker';
 
   // Migration shim: a .env written before key separation carries only
   // JWT_SECRET. Accept it as the data key (it IS the same value) rather
@@ -227,10 +228,11 @@ function load() {
     cliDeviceCreateBurst: parseInt(process.env.CLI_DEVICE_CREATE_BURST || '20', 10),
     cliDeviceLivePerIp: parseInt(process.env.CLI_DEVICE_LIVE_PER_IP || '10', 10),
     cliDeviceLiveGlobal: parseInt(process.env.CLI_DEVICE_LIVE_GLOBAL || '10000', 10),
-    // Only this resolved Docker peer may supply the client address used by
-    // security gates and rate limits. Local development connects directly.
+    // Docker deployments trust only this resolved reverse-proxy peer for the
+    // client address used by security gates and rate limits. Kubernetes uses
+    // the Cilium ingress identity enforced by NetworkPolicy instead.
     trustedProxyHost: process.env.TRUSTED_PROXY_HOST
-      || (!cliLocalMode && !staging ? 'caddy' : ''),
+      || (!cliLocalMode && !staging && appRuntime === 'docker' ? 'caddy' : ''),
     adminUsername: process.env.ADMIN_USERNAME,
     adminPassword: process.env.ADMIN_PASSWORD,
     // KDF input for services/secrets.js (AES-256-GCM at rest). Never
@@ -337,9 +339,9 @@ function load() {
     // existing single-server Docker implementation. Kubernetes never
     // silently falls back to Docker: an incomplete cluster configuration
     // fails the requested operation instead of mutating a different host.
-    appRuntime: process.env.APP_RUNTIME || 'docker',
-    workerRuntime: process.env.WORKER_RUNTIME || process.env.APP_RUNTIME || 'docker',
-    captureRuntime: process.env.CAPTURE_RUNTIME || process.env.APP_RUNTIME || 'docker',
+    appRuntime,
+    workerRuntime: process.env.WORKER_RUNTIME || appRuntime,
+    captureRuntime: process.env.CAPTURE_RUNTIME || appRuntime,
     kubernetes: {
       buildNamespace: process.env.BUILD_NAMESPACE || 'social-builds',
       appNamespace: process.env.APP_NAMESPACE || 'social-apps',

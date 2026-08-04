@@ -85,6 +85,7 @@ const docker = require('./docker');
 const dbManager = require('./db-manager');
 const events = require('./events');
 const stagingEnv = require('./staging-env');
+const applicationRuntime = require('./application-runtime');
 const { getPool } = require('../db/pool');
 
 // Preview teardown is cheaper and less disruptive than a production
@@ -314,6 +315,7 @@ async function staleCount() {
  * unreadable so the console renders "—" rather than a bogus zero.
  */
 async function previewCounts(config) {
+  if (applicationRuntime.mode(config) !== 'docker') return { open: null, stale: null };
   try {
     const containers = await listStagingContainers();
     if (!containers.length) return { open: 0, stale: 0 };
@@ -388,6 +390,7 @@ async function sweepStale(config, { limit = null, isInFlight = null } = {}) {
   _lastStaleSweepStartedAt = Date.now();
   try {
     if (isStagingEnv()) return summary;      // no docker socket in a preview
+    if (applicationRuntime.mode(config) !== 'docker') return summary;
     if (isActive(_job)) return summary;      // an admin sweep owns the fleet
 
     const containers = await listStagingContainers();

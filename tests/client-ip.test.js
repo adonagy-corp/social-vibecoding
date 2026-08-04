@@ -70,3 +70,23 @@ test('proxy resolution failure ignores forwarded data and uses the socket peer',
   await runMiddleware(middleware, req);
   assert.equal(req.clientIp, '172.20.0.2');
 });
+
+test('Kubernetes ingress peer supplies the single forwarded client address without DNS', async () => {
+  const middleware = trustedProxyClientIp({ trustDirectPeer: true });
+  const req = {
+    socket: { remoteAddress: '10.244.1.18' },
+    headers: { 'x-forwarded-for': '203.0.113.8' },
+  };
+  await runMiddleware(middleware, req);
+  assert.equal(req.clientIp, '203.0.113.8');
+});
+
+test('Kubernetes ingress rejects ambiguous forwarding data', async () => {
+  const middleware = trustedProxyClientIp({ trustDirectPeer: true });
+  const req = {
+    socket: { remoteAddress: '10.244.1.18' },
+    headers: { 'x-forwarded-for': '203.0.113.8, 198.51.100.9' },
+  };
+  await runMiddleware(middleware, req);
+  assert.equal(req.clientIp, '10.244.1.18');
+});

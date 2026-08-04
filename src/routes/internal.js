@@ -887,8 +887,8 @@ function internalRoutes(_config) {
     async (req, res) => {
       try {
         const [containers, stats] = await Promise.all([
-          statusSvc.listContainers(),
-          statusSvc.getStats(),
+          statusSvc.listContainers(_config),
+          statusSvc.getStats(_config),
         ]);
         return res.json({
           ok: true,

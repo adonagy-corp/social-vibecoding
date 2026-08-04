@@ -46,3 +46,18 @@ test('PostgreSQL claim template uses only release-stable labels', () => {
   assert.match(claimTemplate, /social-vibecoding-platform\.selectorLabels/);
   assert.doesNotMatch(claimTemplate, /social-vibecoding-platform\.labels/);
 });
+
+test('public platform ingress is restricted to the Cilium ingress identity', () => {
+  const policy = read('deploy/helm/social-vibecoding-platform/templates/networkpolicy.yaml');
+  const platformPolicy = policy.split('kind: NetworkPolicy')[2].split('---')[0];
+  assert.match(platformPolicy, /internalCallerNamespaces/);
+  assert.doesNotMatch(platformPolicy, /ingress:\s*\n\s*- ports:/);
+  assert.match(policy, /fromEntities: \[ingress\]/);
+  assert.match(policy, /\{port: "3000", protocol: TCP\}/);
+});
+
+test('Kubernetes status inventory does not invoke Docker helpers', async () => {
+  const status = require('../src/services/status');
+  assert.deepEqual(await status.listContainers({ appRuntime: 'kubernetes' }), []);
+  assert.deepEqual(await status.getStats({ appRuntime: 'kubernetes' }), {});
+});

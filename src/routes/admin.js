@@ -221,12 +221,12 @@ function adminRoutes(config) {
 
   router.post('/api/admin/staging-reap', requireAdminWrite, drainGuard, async (req, res) => {
     try {
-      // A staging preview has no docker socket (SELF-HOSTING.md Phase 2g),
-      // so it cannot manage other previews. Explicit refusal beats a sweep
-      // that sees an empty inventory and silently reports success.
-      if (stagingReap.isStagingEnv()) {
+      // This fleet-wide inventory sweep is Docker-specific. Kubernetes
+      // previews are managed through their runtime records instead of a
+      // Docker socket, so do not report a misleading successful no-op.
+      if (stagingReap.isStagingEnv() || (config.appRuntime && config.appRuntime !== 'docker')) {
         return res.status(400).json({
-          error: 'The stale-preview sweep is unavailable in staging previews.',
+          error: 'The Docker stale-preview sweep is unavailable in this runtime.',
         });
       }
       const { started, job } = stagingReap.start(config, {

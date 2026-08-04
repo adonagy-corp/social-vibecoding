@@ -44,6 +44,7 @@ function freshFixtures() {
     // docker ps output lines: [name, state, image]
     psLines: [],
     psError: null,
+    dockerExecCalls: 0,
     exists: () => true,
     existsCalls: [],
     // #851: inspect probe (null = "no label there either")
@@ -90,6 +91,7 @@ function installStubs() {
   stub(ids.docker, {
     STAGING_STOP_GRACE_SEC: 2,
     async execFileAsync(_bin, args) {
+      fx.dockerExecCalls += 1;
       if (fx.psError) throw fx.psError;
       // Pin that the sweep asks docker for ALL staging containers, exited
       // ones included — a stopped preview still holds its name, image and
@@ -643,6 +645,18 @@ test('sweepStale: never throws when docker ps fails, and reaps nothing', async (
   assert.deepEqual(summary, { examined: 0, stale: 0, tornDown: 0, failed: 0, skipped: 0 });
   assert.deepEqual(fx.stopCalls, [], 'an unreadable host is a no-op sweep, not a blind one');
   assert.deepEqual(fx.teardownCalls, []);
+});
+
+test('sweepStale: Kubernetes runtime never probes the Docker socket', async () => {
+  const reap = setup();
+  labelledFleet(currentFp());
+
+  const summary = await reap.sweepStale({ appRuntime: 'kubernetes' });
+  const counts = await reap.previewCounts({ appRuntime: 'kubernetes' });
+
+  assert.deepEqual(summary, { examined: 0, stale: 0, tornDown: 0, failed: 0, skipped: 0 });
+  assert.deepEqual(counts, { open: null, stale: null });
+  assert.equal(fx.dockerExecCalls, 0);
 });
 
 test('sweepStale: an all-unlabelled fleet is verified by inspect before acting', async () => {

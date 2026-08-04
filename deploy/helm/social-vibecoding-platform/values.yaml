@@ -110,6 +110,10 @@ ingress:
 networkPolicy:
   enabled: true
   ciliumApiServerEgress: true
+  # Generated apps and workers call authenticated internal platform APIs.
+  internalCallerNamespaces:
+    - social-apps
+    - social-workers
 
 podDisruptionBudget:
   enabled: true

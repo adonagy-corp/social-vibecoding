@@ -119,13 +119,15 @@ log.setLevel(config.logLevel);
 
 const app = express();
 
-// Child apps share the platform's Docker network, so trusting every direct
-// peer's X-Forwarded-For would let one spoof security rate-limit identities.
-// Express therefore never trusts forwarding headers globally. This narrow
-// middleware resolves the configured Caddy peer and exposes req.clientIp;
-// direct child/worker calls retain their real socket address.
+// Express never trusts forwarding headers globally. Docker mode resolves one
+// configured proxy peer; Kubernetes mode lets Cilium/Envoy supply the client
+// address without a proxy hostname. Direct child/worker calls carry no
+// forwarding header and therefore retain their real socket address.
 app.set('trust proxy', false);
-app.use(trustedProxyClientIp({ hostname: config.trustedProxyHost }));
+app.use(trustedProxyClientIp({
+  hostname: config.trustedProxyHost,
+  trustDirectPeer: config.appRuntime === 'kubernetes',
+}));
 
 // Global CLI authentication has a hard staging/enablement gate before any
 // body parser, cookie lookup, bearer lookup, or static fallback. Public

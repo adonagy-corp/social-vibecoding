@@ -31,7 +31,8 @@ const STUCK_SESSION_THRESHOLD_MS = 2 * 60 * 1000;
 const USER_DAILY_LIMIT_CENTS = 2500;
 const GLOBAL_DAILY_LIMIT_CENTS = 20000;
 
-async function listContainers() {
+async function listContainers(config) {
+  if (applicationRuntime.mode(config) !== 'docker') return [];
   try {
     const { stdout } = await execFileAsync('docker', [
       'ps', '-a',
@@ -51,7 +52,8 @@ async function listContainers() {
   }
 }
 
-async function getStats() {
+async function getStats(config) {
+  if (applicationRuntime.mode(config) !== 'docker') return {};
   try {
     const { stdout } = await execFileAsync('docker', [
       'stats', '--no-stream',
@@ -68,7 +70,8 @@ async function getStats() {
   }
 }
 
-async function inspectStarted(name) {
+async function inspectStarted(name, config) {
+  if (applicationRuntime.mode(config) !== 'docker') return null;
   try {
     const { stdout } = await execFileAsync('docker', [
       'inspect', '--format', '{{.State.StartedAt}}', name,
@@ -144,8 +147,8 @@ async function gatherFull(config) {
          COUNT(*) FILTER (WHERE status = 'archived' AND cc_purged = FALSE)            AS archived_resumable
        FROM chat_sessions`
     ),
-    listContainers(),
-    getStats(),
+    listContainers(config),
+    getStats(config),
   ]);
 
   const apps = appsQ.rows;
@@ -175,7 +178,7 @@ async function gatherFull(config) {
     }
   }
   const workers = await Promise.all(workerContainers.map(async (c) => {
-    const startedAt = await inspectStarted(c.name);
+    const startedAt = await inspectStarted(c.name, config);
     const sessionId = parseInt(c.name.match(/(?:usernode-worker-|sv-worker-s)(\d+)$/)?.[1], 10) || null;
     const sess = sessions.find((s) => s.id === sessionId);
     const prog = workerProgress.get(sessionId);
