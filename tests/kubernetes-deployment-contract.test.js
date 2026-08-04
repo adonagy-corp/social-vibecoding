@@ -33,10 +33,21 @@ test('migration command validates the target database identifier', () => {
   assert.throws(() => databaseName('postgres://user:pass@db:5432/bad-name'), /Unsafe database name/);
 });
 
-test('migration Job receives the canonical production origin', () => {
+test('Kubernetes workloads receive the canonical repository and release revision', () => {
   const migrationJob = read('deploy/helm/social-vibecoding-platform/templates/migration-job.yaml');
+  const platform = read('deploy/helm/social-vibecoding-platform/templates/platform.yaml');
   assert.match(migrationJob, /name: USERNODE_DOMAIN, value: \{\{ \.Values\.config\.domain \| quote \}\}/);
   assert.match(migrationJob, /name: CLI_CANONICAL_ORIGIN, value: \{\{ printf "https:\/\/%s" \.Values\.config\.domain \| quote \}\}/);
+  assert.match(migrationJob, /name: USERNODE_PLATFORM_REPO, value: \{\{ \.Values\.config\.platformRepository \| quote \}\}/);
+  assert.match(migrationJob, /name: GIT_SHA, value: \{\{ \.Values\.release\.sourceRevision \| quote \}\}/);
+  assert.match(platform, /name: USERNODE_PLATFORM_REPO, value: \{\{ \.Values\.config\.platformRepository \| quote \}\}/);
+  assert.match(platform, /name: GIT_SHA, value: \{\{ \.Values\.release\.sourceRevision \| quote \}\}/);
+});
+
+test('/api/version uses the canonical configured platform repository', () => {
+  const server = read('server.js');
+  assert.match(server, /repoUrl: config\.platformRepoUrl/);
+  assert.doesNotMatch(server, /repoUrl: process\.env\.USERNODE_REPO_URL/);
 });
 
 test('PostgreSQL claim template uses only release-stable labels', () => {

@@ -459,7 +459,11 @@ function load() {
     // repo as a child app), and the self-app boot seed (Phase 2f).
     // Default targets the canonical Usernode-Labs repo; forks self-
     // hosting under their own org just need to override this in .env.
-    platformRepoUrl: (process.env.USERNODE_PLATFORM_REPO || 'https://github.com/Usernode-Labs/social-vibecoding').replace(/\/$/, ''),
+    platformRepoUrl: (
+      process.env.USERNODE_PLATFORM_REPO
+      || process.env.USERNODE_REPO_URL
+      || 'https://github.com/Usernode-Labs/social-vibecoding'
+    ).replace(/\/$/, ''),
     selfAppSlug: SELF_APP_SLUG,
     selfAppDbName: SELF_APP_DB_NAME,
     // The platform's own DNS name on the shared docker network. Child

@@ -306,7 +306,7 @@ app.get('/api/version', (_req, res) => {
   res.json({
     sha: process.env.GIT_SHA || 'dev',
     name: process.env.USERNODE_PROJECT_NAME || 'usernode',
-    repoUrl: process.env.USERNODE_REPO_URL || 'https://github.com/Usernode-Labs/social-vibecoding',
+    repoUrl: config.platformRepoUrl,
     deployProgress: deployStatus.read(),
     // Which environment this build is: 'staging' | 'production' | null.
     // Only used to NAME the no-SHA state in the drawer's "Platform
