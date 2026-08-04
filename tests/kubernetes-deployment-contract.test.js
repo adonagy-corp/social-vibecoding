@@ -38,3 +38,11 @@ test('migration Job receives the canonical production origin', () => {
   assert.match(migrationJob, /name: USERNODE_DOMAIN, value: \{\{ \.Values\.config\.domain \| quote \}\}/);
   assert.match(migrationJob, /name: CLI_CANONICAL_ORIGIN, value: \{\{ printf "https:\/\/%s" \.Values\.config\.domain \| quote \}\}/);
 });
+
+test('PostgreSQL claim template uses only release-stable labels', () => {
+  const postgresql = read('deploy/helm/social-vibecoding-platform/templates/postgresql.yaml');
+  const claimTemplate = postgresql.split('volumeClaimTemplates:')[1];
+  assert.ok(claimTemplate, 'volumeClaimTemplates exists');
+  assert.match(claimTemplate, /social-vibecoding-platform\.selectorLabels/);
+  assert.doesNotMatch(claimTemplate, /social-vibecoding-platform\.labels/);
+});

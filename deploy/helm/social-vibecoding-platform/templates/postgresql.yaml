@@ -106,7 +106,9 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "social-vibecoding-platform.labels" . | nindent 10 }}
+          {{- include "social-vibecoding-platform.selectorLabels" . | nindent 10 }}
+          app.kubernetes.io/component: postgresql
+          app.kubernetes.io/part-of: social-vibecoding
       spec:
         accessModes: ["ReadWriteOnce"]
         storageClassName: {{ .Values.postgresql.storage.storageClassName | quote }}
