@@ -12,6 +12,11 @@ const assert = require('node:assert/strict');
 const worker = require('../src/services/worker');
 const log = require('../src/services/logger');
 
+test('Kubernetes journal deadline uses a finite numeric worker TTL', () => {
+  assert.equal(worker.WORKER_JWT_TTL_MS, 24 * 60 * 60 * 1000);
+  assert.equal(Number.isFinite(Date.now() + worker.WORKER_JWT_TTL_MS), true);
+});
+
 // ── Watchdog strike accounting ──────────────────────────────────────────
 
 test('watchdog: three consecutive probe FAILURES (null) do not abandon', () => {

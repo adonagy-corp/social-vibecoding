@@ -66,6 +66,7 @@ test('worker token round-trips with its scope and session id', () => {
   assert.equal(claims.pur, 'worker:session');
   assert.equal(claims.aud, 'usernode:worker');
   assert.ok(!('prod_debug' in claims));
+  assert.equal(claims.exp - claims.iat, pj.WORKER_TTL_S);
 });
 
 test('prodDebug adds the prod_debug claim and nothing else', () => {

@@ -65,6 +65,11 @@ const PUR_EDGE_COOKIE = 'edge:cookie';
 const IFRAME_TTL = '1h';
 const CAPTURE_TTL = '15m';
 const WORKER_TTL = '24h';
+// Numeric twin of WORKER_TTL for deadline arithmetic. jsonwebtoken accepts
+// the human-readable value above, but multiplying "24h" produces NaN and
+// caused the Kubernetes journal watcher to detach immediately while the
+// coding agent kept running in the worker Pod.
+const WORKER_TTL_S = 24 * 60 * 60;
 const EDGE_GRANT_TTL_S = 120;
 const EDGE_COOKIE_TTL_S = 12 * 60 * 60;
 
@@ -501,6 +506,7 @@ module.exports = {
   IFRAME_TTL,
   CAPTURE_TTL,
   WORKER_TTL,
+  WORKER_TTL_S,
   EDGE_GRANT_TTL_S,
   EDGE_COOKIE_TTL_S,
   appAudience,

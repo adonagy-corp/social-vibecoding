@@ -70,6 +70,7 @@ const PLATFORM_INTERNAL_URL = process.env.PLATFORM_INTERNAL_URL || 'http://usern
 // every per-turn `docker exec`. The TTL itself lives with the signer in
 // services/platform-jwt.js; kept here as the name the comments below use.
 const WORKER_JWT_TTL = platformJwt.WORKER_TTL;
+const WORKER_JWT_TTL_MS = platformJwt.WORKER_TTL_S * 1000;
 
 // Version of the warm-container runtime contract. Bump whenever either the
 // bootstrap environment OR an installed runner changes incompatibly with the
@@ -1991,7 +1992,10 @@ async function inspectContainerState(containerName) {
 async function _consumeJournal(containerName, journal, progress, state, { sessionId = null } = {}) {
   if (usesKubernetesWorkers()) {
     let linesConsumed = 0;
-    const deadline = Date.now() + WORKER_JWT_TTL * 1000;
+    // WORKER_JWT_TTL is the jsonwebtoken duration string "24h". Use its
+    // numeric twin for arithmetic; coercing the string produces NaN and
+    // makes this loop return probe_unobservable before its first poll.
+    const deadline = Date.now() + WORKER_JWT_TTL_MS;
     while (Date.now() < deadline) {
       try {
         const { stdout } = await execWorkerCommand(containerName, ['cat', journal]);
@@ -2769,6 +2773,7 @@ module.exports = {
   parseLine,
   newWatchdogCounters,
   recordWatchdogProbe,
+  WORKER_JWT_TTL_MS,
   // #889: in-container stop procedure (exported for tests)
   buildTurnStopScript,
   // exposed for the routes' container-name lookups
