@@ -171,3 +171,113 @@ test('capture runtime uses a bounded Job and caps log retrieval', async () => {
   assert.equal(logRequest.limitBytes, 64 * 1024 * 1024);
   assert.equal(result.stdout, 'result');
 });
+
+test('status inventory normalizes application, preview and worker readiness from Deployments and Pods', async () => {
+  const deploymentsByNamespace = {
+    'social-apps': [
+      {
+        metadata: {
+          name: 'sv-app-7-demo', uid: 'app-deploy', generation: 2,
+          labels: {
+            'social.usernode.io/environment': 'production',
+            'social.usernode.io/app-id': '7',
+          },
+        },
+        spec: { replicas: 1, template: { spec: { containers: [{ image: 'example/app@sha256:one' }] } } },
+        status: { observedGeneration: 2, replicas: 1, readyReplicas: 1, availableReplicas: 1 },
+      },
+      {
+        metadata: {
+          name: 'sv-preview-7-s42', uid: 'preview-deploy', generation: 3,
+          labels: {
+            'social.usernode.io/environment': 'staging',
+            'social.usernode.io/app-id': '7',
+            'social.usernode.io/session-id': '42',
+          },
+        },
+        spec: { replicas: 1, template: { spec: { containers: [{ image: 'example/app@sha256:two' }] } } },
+        status: { observedGeneration: 3, replicas: 1, unavailableReplicas: 1 },
+      },
+    ],
+    'social-workers': [
+      {
+        metadata: {
+          name: 'sv-worker-s42', uid: 'worker-deploy', generation: 1,
+          labels: {
+            'social.usernode.io/environment': 'worker',
+            'social.usernode.io/session-id': '42',
+          },
+        },
+        spec: { replicas: 1, template: { spec: { containers: [{ image: 'example/worker@sha256:three' }] } } },
+        status: { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1 },
+      },
+    ],
+  };
+  const podsByNamespace = {
+    'social-apps': [{
+      metadata: {
+        name: 'sv-app-7-demo-pod', uid: 'app-pod', creationTimestamp: '2026-08-05T08:00:00Z',
+        labels: { 'social.usernode.io/runtime-name': 'sv-app-7-demo' },
+      },
+      status: {
+        conditions: [{ type: 'Ready', status: 'True' }],
+        containerStatuses: [{ restartCount: 2 }],
+      },
+    }],
+    'social-workers': [{
+      metadata: {
+        name: 'sv-worker-s42-pod', uid: 'worker-pod', creationTimestamp: '2026-08-05T08:05:00Z',
+        labels: { 'social.usernode.io/runtime-name': 'sv-worker-s42' },
+      },
+      status: { conditions: [{ type: 'Ready', status: 'True' }], containerStatuses: [{ restartCount: 0 }] },
+    }],
+  };
+  kubernetes._setClientsForTest({
+    apps: {
+      async listNamespacedDeployment({ namespace }) { return { items: deploymentsByNamespace[namespace] || [] }; },
+    },
+    core: {
+      async listNamespacedPod({ namespace }) { return { items: podsByNamespace[namespace] || [] }; },
+    },
+  });
+
+  const inventory = await kubernetes.listStatusResources(config());
+  const app = inventory.find((item) => item.name === 'sv-app-7-demo');
+  const preview = inventory.find((item) => item.name === 'sv-preview-7-s42');
+  const worker = inventory.find((item) => item.name === 'sv-worker-s42');
+  assert.equal(app.resourceType, 'app');
+  assert.equal(app.state, 'running');
+  assert.equal(app.startedAt, '2026-08-05T08:00:00Z');
+  assert.match(app.status, /2 restarts/);
+  assert.equal(preview.resourceType, 'staging');
+  assert.equal(preview.state, 'restarting');
+  assert.equal(preview.sessionId, 42);
+  assert.equal(worker.resourceType, 'worker');
+  assert.equal(worker.state, 'running');
+});
+
+test('namespace capacity reports requests and pod quota without claiming live usage', async () => {
+  kubernetes._setClientsForTest({
+    core: {
+      async listNamespacedResourceQuota({ namespace }) {
+        return {
+          items: [{
+            metadata: { name: 'social-vibecoding' },
+            status: {
+              hard: { pods: '100', 'requests.cpu': '16', 'requests.memory': '32Gi' },
+              used: { pods: namespace === 'social-apps' ? '4' : '0', 'requests.cpu': '750m', 'requests.memory': '1536Mi' },
+            },
+          }],
+        };
+      },
+    },
+  });
+
+  const capacity = await kubernetes.listNamespaceCapacity(config());
+  const apps = capacity.find((item) => item.namespace === 'social-apps');
+  assert.deepEqual(apps.resources.pods, { used: '4', hard: '100', percent: 4, headroomPercent: 96 });
+  assert.deepEqual(apps.resources.requestsCpu, { used: '750m', hard: '16', percent: 4.7, headroomPercent: 95.3 });
+  assert.deepEqual(apps.resources.requestsMemory, { used: '1536Mi', hard: '32Gi', percent: 4.7, headroomPercent: 95.3 });
+  assert.equal(kubernetes._quantityNumberForTest('1Gi'), 2 ** 30);
+  assert.equal(kubernetes._quantityNumberForTest('250m'), 0.25);
+});

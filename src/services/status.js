@@ -1,6 +1,3 @@
-const os = require('os');
-const { execFile } = require('child_process');
-const { promisify } = require('util');
 const { getPool } = require('../db/pool');
 const log = require('./logger');
 const workerProgress = require('./worker-progress');
@@ -10,8 +7,7 @@ const nodeStatus = require('./node-status');
 // in this file (where `worker = workers.find(...)` rebinds the name).
 const workerSvc = require('./worker');
 const applicationRuntime = require('./application-runtime');
-
-const execFileAsync = promisify(execFile);
+const runtimeStatus = require('./runtime-status');
 
 const WORKER_PREFIX = 'usernode-worker-';
 const APP_PREFIX = 'usernode-app-';
@@ -32,55 +28,11 @@ const USER_DAILY_LIMIT_CENTS = 2500;
 const GLOBAL_DAILY_LIMIT_CENTS = 20000;
 
 async function listContainers(config) {
-  if (applicationRuntime.mode(config) !== 'docker') return [];
-  try {
-    const { stdout } = await execFileAsync('docker', [
-      'ps', '-a',
-      '--format', '{{.Names}}\t{{.ID}}\t{{.State}}\t{{.Status}}\t{{.Image}}',
-    ], { timeout: 5000 });
-    return stdout
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
-        const [name, id, state, status, image] = line.split('\t');
-        return { name, id, state, status, image };
-      });
-  } catch (err) {
-    log.warn('status', 'docker ps failed', { err: err.message });
-    return [];
-  }
+  return runtimeStatus.listDockerContainers(config);
 }
 
 async function getStats(config) {
-  if (applicationRuntime.mode(config) !== 'docker') return {};
-  try {
-    const { stdout } = await execFileAsync('docker', [
-      'stats', '--no-stream',
-      '--format', '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}',
-    ], { timeout: 10000 });
-    const map = {};
-    for (const line of stdout.trim().split('\n').filter(Boolean)) {
-      const [name, mem, cpu] = line.split('\t');
-      map[name] = { mem, cpu };
-    }
-    return map;
-  } catch {
-    return {};
-  }
-}
-
-async function inspectStarted(name, config) {
-  if (applicationRuntime.mode(config) !== 'docker') return null;
-  try {
-    const { stdout } = await execFileAsync('docker', [
-      'inspect', '--format', '{{.State.StartedAt}}', name,
-    ], { timeout: 3000 });
-    const t = stdout.trim();
-    return t && !t.startsWith('0001-') ? t : null;
-  } catch {
-    return null;
-  }
+  return runtimeStatus.getDockerStats(config);
 }
 
 function uptimeSeconds(iso) {
@@ -94,15 +46,15 @@ function uptimeSeconds(iso) {
 // fields). Caching layer below stores this and the per-request `gather()`
 // strips admin-only fields for non-admin viewers via `redact()`.
 //
-// This is the slow path — three DB queries plus `docker ps -a`,
-// `docker stats --no-stream`, and a `docker inspect` per container.
-// Total wall time is dominated by `docker stats` (~1-2s on a small
-// host). Don't call directly from a request handler; use `gather()`.
+// This is the slow path — four DB queries plus the active runtime's
+// inventory/capacity calls. Docker also collects one-shot stats and start
+// timestamps; Kubernetes deliberately sticks to readiness and quota data.
+// Don't call directly from a request handler; use `gather()`.
 async function gatherFull(config) {
   const pool = getPool(config);
   const isAdmin = true; // Always build the full payload; redact at serve time.
 
-  const [appsQ, sessionsQ, llmQ, sessionCountsQ, containers, stats] = await Promise.all([
+  const [appsQ, sessionsQ, llmQ, sessionCountsQ, runtimeQ] = await Promise.all([
     pool.query(
       `SELECT a.id, a.name, a.slug, a.repo_url, a.container_id, a.status, a.created_at,
               a.image_ref, a.build_ref, a.runtime_kind, a.runtime_name,
@@ -147,8 +99,7 @@ async function gatherFull(config) {
          COUNT(*) FILTER (WHERE status = 'archived' AND cc_purged = FALSE)            AS archived_resumable
        FROM chat_sessions`
     ),
-    listContainers(config),
-    getStats(config),
+    runtimeStatus.snapshot(config),
   ]);
 
   const apps = appsQ.rows;
@@ -158,6 +109,10 @@ async function gatherFull(config) {
     userId: r.user_id,
     costCents: parseFloat(r.total_cost_cents || 0),
   }));
+
+  const containers = runtimeQ.resources || [];
+  const stats = runtimeQ.stats || {};
+  const runtimeKind = runtimeQ.runtimeKind || applicationRuntime.mode(config);
 
   const byName = Object.fromEntries(containers.map((c) => [c.name, c]));
 
@@ -171,15 +126,23 @@ async function gatherFull(config) {
     warmByName.set(meta.containerName, meta);
   }
 
-  const workerContainers = containers.filter((c) => c.name.startsWith(WORKER_PREFIX));
+  const workerContainers = containers.filter((c) =>
+    c.resourceType === 'worker' || c.name.startsWith(WORKER_PREFIX)
+  );
   for (const meta of workerSvc.warmRegistrySnapshot()) {
-    if (!workerContainers.some((container) => container.name === meta.containerName)) {
-      workerContainers.push({ name: meta.containerName, id: null, state: 'running', status: 'Kubernetes Deployment' });
+    if (runtimeKind === 'docker'
+        && !workerContainers.some((container) => container.name === meta.containerName)) {
+      workerContainers.push({
+        name: meta.containerName, id: null, state: 'running',
+        status: 'Docker container', runtimeKind: 'docker',
+      });
     }
   }
   const workers = await Promise.all(workerContainers.map(async (c) => {
-    const startedAt = await inspectStarted(c.name, config);
-    const sessionId = parseInt(c.name.match(/(?:usernode-worker-|sv-worker-s)(\d+)$/)?.[1], 10) || null;
+    const startedAt = c.startedAt || null;
+    const sessionId = c.sessionId
+      || parseInt(c.name.match(/(?:usernode-worker-|sv-worker-s)(\d+)$/)?.[1], 10)
+      || null;
     const sess = sessions.find((s) => s.id === sessionId);
     const prog = workerProgress.get(sessionId);
     const uptime = uptimeSeconds(startedAt);
@@ -233,10 +196,8 @@ async function gatherFull(config) {
     const prodName = app.runtime_name || `${APP_PREFIX}${app.slug}`;
     const prod = byName[prodName];
     const prodRuntimeKind = app.runtime_kind || 'docker';
-    const prodState = prodRuntimeKind === 'kubernetes' && app.runtime_name
-      ? await applicationRuntime.status(config, { runtimeKind: 'kubernetes', runtimeName: app.runtime_name }).catch(() => 'unknown')
-      : (prod?.state || 'not_found');
-    const prodStarted = prodRuntimeKind === 'docker' && prod ? await inspectStarted(prodName) : null;
+    const prodState = prod?.state || 'not_found';
+    const prodStarted = prod?.startedAt || null;
 
     const appSessions = await Promise.all(sessions
       .filter((s) => s.app_id === app.id)
@@ -244,9 +205,7 @@ async function gatherFull(config) {
         const stagingName = s.staging_runtime_name || `${STAGING_PREFIX}${app.slug}--${s.id}`;
         const staging = byName[stagingName];
         const stagingRuntimeKind = s.staging_runtime_kind || 'docker';
-        const stagingState = stagingRuntimeKind === 'kubernetes' && s.staging_runtime_name
-          ? await applicationRuntime.status(config, { runtimeKind: 'kubernetes', runtimeName: s.staging_runtime_name }).catch(() => 'unknown')
-          : (staging?.state || 'not_found');
+        const stagingState = staging?.state || 'not_found';
         const worker = workers.find((w) => w.sessionId === s.id) || null;
         return {
           id: s.id,
@@ -261,6 +220,8 @@ async function gatherFull(config) {
           createdAt: s.created_at,
           ageSeconds: uptimeSeconds(s.created_at),
           status: s.status,
+          stagingRuntimeName: stagingName,
+          stagingRuntimeKind,
           staging: stagingState !== 'not_found' ? {
             name: stagingName,
             state: stagingState,
@@ -296,6 +257,8 @@ async function gatherFull(config) {
       createdAt: app.created_at,
       openSessions: parseInt(app.open_sessions, 10),
       openIssues: parseInt(app.open_issues, 10),
+      prodRuntimeName: prodName,
+      prodRuntimeKind,
       prod: prodState !== 'not_found' ? {
         name: prodName,
         state: prodState,
@@ -311,12 +274,15 @@ async function gatherFull(config) {
   }));
 
   // Counters.
-  const stagingContainers = containers.filter((c) => c.name.startsWith(STAGING_PREFIX));
+  const stagingContainers = containers.filter((c) =>
+    c.resourceType === 'staging' || c.name.startsWith(STAGING_PREFIX)
+  );
   const stagingRunning = stagingContainers.filter((c) => c.state === 'running').length;
+  const workerReady = workers.filter((w) => w.state === 'running').length;
 
   const stagingPerUser = {};
   for (const s of sessions) {
-    if (s.staging_container_id) {
+    if (s.staging_runtime_name || s.staging_container_id) {
       stagingPerUser[s.username] = (stagingPerUser[s.username] || 0) + 1;
     }
   }
@@ -343,11 +309,11 @@ async function gatherFull(config) {
   const driftContainers = [];
   for (const a of appTree) {
     if (a.prodMissing) {
-      driftContainers.push({ kind: 'app', slug: a.slug, expected: a.prod?.name || `${APP_PREFIX}${a.slug}` });
+      driftContainers.push({ kind: 'app', slug: a.slug, expected: a.prodRuntimeName });
     }
     for (const s of a.sessions) {
       if (s.stagingDriftWarning) {
-        driftContainers.push({ kind: 'staging', slug: a.slug, sessionId: s.id, expected: `${STAGING_PREFIX}${a.slug}--${s.id}` });
+        driftContainers.push({ kind: 'staging', slug: a.slug, sessionId: s.id, expected: s.stagingRuntimeName });
       }
     }
   }
@@ -391,17 +357,9 @@ async function gatherFull(config) {
     },
     staleNotified: num(sc.stale_notified),
     archivedResumable: num(sc.archived_resumable),
+    namespaces: runtimeQ.namespaceCapacity || [],
   };
-
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const host = {
-    memTotalBytes: totalMem,
-    memFreeBytes: freeMem,
-    memUsedPct: totalMem ? Math.round(((totalMem - freeMem) / totalMem) * 100) : null,
-    loadAvg1: Math.round((os.loadavg()[0] || 0) * 100) / 100,
-    cpus: os.cpus().length,
-  };
+  const host = runtimeQ.host || null;
 
   let dbPool = null;
   try {
@@ -418,8 +376,11 @@ async function gatherFull(config) {
     prodRunning: appTree.filter((a) => a.prod?.state === 'running').length,
     prodMissing: appTree.filter((a) => a.prodMissing).length,
     stagingRunning,
+    stagingTotal: stagingContainers.length,
     stagingCap: globalCap,
-    workersRunning: workers.filter((w) => w.state === 'running').length,
+    workersRunning: workerReady,
+    workersReady: workerReady,
+    workersTotal: workers.length,
     workersInFlight,
     workersWarmIdle,
     workersBootstrapping,
@@ -431,8 +392,8 @@ async function gatherFull(config) {
     sessionsGlobalUsed: capacity.globalUsed,
     sessionsGlobalCap: globalCap,
     activeTurns: capacity.activeTurns,
-    hostMemUsedPct: host.memUsedPct,
-    hostLoadAvg1: host.loadAvg1,
+    hostMemUsedPct: host?.memUsedPct ?? null,
+    hostLoadAvg1: host?.loadAvg1 ?? null,
     dbPoolWaiting: dbPool ? dbPool.waiting : null,
   };
 
@@ -442,6 +403,7 @@ async function gatherFull(config) {
     // is available for debugging the cache.
     now: new Date().toISOString(),
     version: process.env.GIT_SHA || 'dev',
+    runtimeKind,
     isAdmin: true, // overridden in redact() based on requester
     deployProgress: deployStatus.read(),
     node: nodeStatus.get(),
@@ -500,7 +462,7 @@ function redact(full, { isAdmin }) {
   };
   // Drop host RAM/load + pg pool internals (operational signal we only
   // want admins to see) along with the existing admin-only blocks.
-  const { llmUsage, events, summary, limits, apps, workers, host, db, ...rest } = full;
+  const { llmUsage, events, summary, limits, apps, workers, host, db, capacity, ...rest } = full;
   const {
     globalSpendCents, globalSpendCap,
     hostMemUsedPct, hostLoadAvg1, dbPoolWaiting,
@@ -514,6 +476,7 @@ function redact(full, { isAdmin }) {
     node: nodeStatus.get(),
     explorer: nodeStatus.getExplorer(),
     summary: publicSummary,
+    capacity: { ...(capacity || {}), namespaces: [] },
     limits: publicLimits,
     apps: (apps || []).map((a) => ({
       ...a,
@@ -527,8 +490,8 @@ function redact(full, { isAdmin }) {
 //
 // The dashboard polls /api/status every 5s, and a single page load fires
 // the first request before the JS has rendered anything. Without this
-// cache, every refresh waited 1-2s for `docker stats` to come back, so
-// the page felt blank for that whole window.
+// cache, every Docker refresh waited 1-2s for `docker stats`; Kubernetes
+// also benefits by coalescing its namespace inventory API calls.
 //
 // SWR semantics:
 //   - cache age < FRESH (3s)  → serve cached, do nothing
@@ -537,7 +500,7 @@ function redact(full, { isAdmin }) {
 //
 // `start()` warms the cache at server boot so the very first user request
 // also gets the instant path. Background refreshes never throw — failures
-// just leave the cache as-is, so a transient docker-daemon hiccup keeps
+// just leave the cache as-is, so a transient runtime API hiccup keeps
 // serving stale data instead of 500ing.
 const CACHE_FRESH_MS = 3000;
 const CACHE_STALE_MS = 15000;

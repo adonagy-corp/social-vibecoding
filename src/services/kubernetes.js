@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const stream = require('stream');
 const k8s = require('@kubernetes/client-node');
+const log = require('./logger');
 
 const MANAGED_BY = 'social-vibecoding-runtime';
 const PART_OF = 'social-vibecoding';
@@ -403,6 +404,141 @@ async function listWorkers(config) {
   })).filter((item) => Number.isFinite(item.sessionId));
 }
 
+function deploymentState(deployment) {
+  const desired = deployment.spec?.replicas ?? 1;
+  const ready = deployment.status?.readyReplicas || 0;
+  const available = deployment.status?.availableReplicas || 0;
+  const observed = deployment.status?.observedGeneration || 0;
+  const generation = deployment.metadata?.generation || 0;
+  if (desired === 0) return 'stopped';
+  if (ready >= desired && available >= desired && observed >= generation) return 'running';
+  if ((deployment.status?.replicas || 0) > 0 || deployment.status?.unavailableReplicas) return 'restarting';
+  return 'creating';
+}
+
+function readyPod(pod) {
+  return (pod.status?.conditions || []).some((condition) =>
+    condition.type === 'Ready' && condition.status === 'True'
+  );
+}
+
+function normalizeDeployment(deployment, pods) {
+  const runtimeName = deployment.metadata?.name;
+  const labelsMap = deployment.metadata?.labels || {};
+  const matchingPods = (pods || []).filter((pod) =>
+    pod.metadata?.labels?.['social.usernode.io/runtime-name'] === runtimeName
+      && !pod.metadata?.deletionTimestamp
+  );
+  const readyPods = matchingPods.filter(readyPod);
+  const candidates = readyPods.length ? readyPods : matchingPods;
+  candidates.sort((left, right) =>
+    new Date(right.metadata?.creationTimestamp || 0) - new Date(left.metadata?.creationTimestamp || 0)
+  );
+  const currentPod = candidates[0] || null;
+  const desired = deployment.spec?.replicas ?? 1;
+  const ready = deployment.status?.readyReplicas || 0;
+  const restarts = matchingPods.reduce((total, pod) => total + (pod.status?.containerStatuses || [])
+    .reduce((sum, container) => sum + (container.restartCount || 0), 0), 0);
+  const environment = labelsMap['social.usernode.io/environment'] || 'unknown';
+  return {
+    name: runtimeName,
+    id: currentPod?.metadata?.uid || deployment.metadata?.uid || null,
+    runtimeKind: 'kubernetes',
+    resourceType: environment === 'production' ? 'app' : environment,
+    environment,
+    state: deploymentState(deployment),
+    status: `${ready}/${desired} ready${restarts ? ` · ${restarts} restart${restarts === 1 ? '' : 's'}` : ''}`,
+    image: deployment.spec?.template?.spec?.containers?.[0]?.image || null,
+    startedAt: currentPod?.metadata?.creationTimestamp || deployment.metadata?.creationTimestamp || null,
+    appId: Number(labelsMap['social.usernode.io/app-id']) || null,
+    sessionId: Number(labelsMap['social.usernode.io/session-id']) || null,
+    ready,
+    desired,
+    restarts,
+  };
+}
+
+async function listStatusResources(config) {
+  const cfg = config.kubernetes;
+  const selector = 'app.kubernetes.io/managed-by=social-vibecoding-runtime';
+  const namespaces = [...new Set([cfg.appNamespace, cfg.workerNamespace].filter(Boolean))];
+  const { apps, core } = getClients();
+  const perNamespace = await Promise.all(namespaces.map(async (namespace) => {
+    const [deployments, pods] = await Promise.all([
+      apps.listNamespacedDeployment({ namespace, labelSelector: selector }),
+      core.listNamespacedPod({ namespace, labelSelector: selector }),
+    ]);
+    return (deployments.items || []).map((deployment) =>
+      normalizeDeployment(deployment, pods.items || [])
+    );
+  }));
+  return perNamespace.flat();
+}
+
+const QUANTITY_MULTIPLIERS = {
+  n: 1e-9, u: 1e-6, m: 1e-3,
+  '': 1,
+  k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
+  Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50,
+};
+
+function quantityNumber(value) {
+  const match = String(value ?? '').trim().match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-zA-Z]*)$/);
+  if (!match || !Object.prototype.hasOwnProperty.call(QUANTITY_MULTIPLIERS, match[2])) return null;
+  const result = Number(match[1]) * QUANTITY_MULTIPLIERS[match[2]];
+  return Number.isFinite(result) ? result : null;
+}
+
+function quotaMetric(quota, key) {
+  const hard = quota.status?.hard?.[key] ?? quota.spec?.hard?.[key];
+  if (hard === undefined || hard === null) return null;
+  const used = quota.status?.used?.[key] ?? '0';
+  const hardNumber = quantityNumber(hard);
+  const usedNumber = quantityNumber(used);
+  return {
+    used: String(used),
+    hard: String(hard),
+    percent: hardNumber && usedNumber !== null
+      ? Math.max(0, Math.round((usedNumber / hardNumber) * 1000) / 10)
+      : null,
+    headroomPercent: hardNumber && usedNumber !== null
+      ? Math.max(0, Math.round((1 - (usedNumber / hardNumber)) * 1000) / 10)
+      : null,
+  };
+}
+
+async function listNamespaceCapacity(config) {
+  const cfg = config.kubernetes;
+  const namespaces = [...new Set([
+    cfg.appNamespace,
+    cfg.workerNamespace,
+    cfg.buildNamespace,
+  ].filter(Boolean))];
+  const { core } = getClients();
+  return Promise.all(namespaces.map(async (namespace) => {
+    try {
+      const response = await core.listNamespacedResourceQuota({ namespace });
+      const quotas = response.items || [];
+      const quota = quotas.find((item) => item.metadata?.name === 'social-vibecoding') || quotas[0];
+      if (!quota) return { namespace, quotaName: null, resources: null };
+      return {
+        namespace,
+        quotaName: quota.metadata?.name || null,
+        resources: {
+          pods: quotaMetric(quota, 'pods'),
+          requestsCpu: quotaMetric(quota, 'requests.cpu'),
+          requestsMemory: quotaMetric(quota, 'requests.memory'),
+        },
+      };
+    } catch (err) {
+      log.warn('kubernetes', 'Namespace quota status unavailable', {
+        namespace, err: err.message,
+      });
+      return { namespace, quotaName: null, resources: null, unavailable: true };
+    }
+  }));
+}
+
 async function cloneWorkerVolume(config, sourceSessionId, targetSessionId) {
   const cfg = config.kubernetes;
   const namespace = cfg.workerNamespace;
@@ -494,5 +630,9 @@ module.exports = {
   getApplicationLogs, restartApplication, deleteApplication, deleteBuilds, ensureWorker,
   runCaptureJob, execInWorker, _getClients: getClients,
   getWorkerStatus, deleteWorker, listWorkers, cloneWorkerVolume,
+  listStatusResources, listNamespaceCapacity,
   _setClientsForTest: setClientsForTest, _envChecksumForTest: envChecksum,
+  _deploymentStateForTest: deploymentState,
+  _normalizeDeploymentForTest: normalizeDeployment,
+  _quantityNumberForTest: quantityNumber,
 };

@@ -1667,6 +1667,8 @@ const AdminConsole = {
     // Tracked separately from _reapDemo: the POST is refused in a preview
     // whether or not the reviewer arrived with ?demo=1.
     AdminConsole._reapStaging = !!data.staging;
+    AdminConsole._reapAvailable = data.available !== false;
+    AdminConsole._reapUnavailableReason = data.unavailableReason || null;
     AdminConsole._paintStagingReap(data.job || null);
   },
 
@@ -1759,7 +1761,9 @@ const AdminConsole = {
     }
     if (autoEl) {
       const auto = AdminConsole._reapAutomatic;
-      if (!auto || !auto.intervalMs) {
+      if (AdminConsole._reapUnavailableReason === 'kubernetes') {
+        autoEl.textContent = 'Kubernetes stale-preview administration is not implemented yet; normal per-session idle cleanup still applies.';
+      } else if (!auto || !auto.intervalMs) {
         autoEl.textContent = 'The automatic background sweep is switched off.';
       } else if (!auto.lastRunAt) {
         const every = Math.round(auto.intervalMs / 60000);
@@ -1785,10 +1789,13 @@ const AdminConsole = {
       // than letting a reviewer press it into a 400. Gate on `staging`, not
       // on `demo`: the refusal applies with or without ?demo=1.
       const preview = !!AdminConsole._reapStaging || !!AdminConsole._reapDemo;
-      btn.disabled = running || preview;
+      const runtimeUnavailable = AdminConsole._reapAvailable === false;
+      btn.disabled = running || preview || runtimeUnavailable;
       btn.textContent = preview
         ? 'Unavailable in previews'
-        : (running ? 'Sweep in progress…' : 'Shut down stale previews');
+        : (AdminConsole._reapUnavailableReason === 'kubernetes'
+          ? 'Not yet supported in Kubernetes'
+          : (running ? 'Sweep in progress…' : 'Shut down stale previews'));
     }
     const summaryPrefix = AdminConsole._reapDemo
       ? '<span class="text-indigo-500">Staging demo data</span> — ' : '';

@@ -121,7 +121,36 @@ const AdminStatus = {
       <span>per-user cap <span class="mono text-gray-800 dark:text-gray-200">${c.userCap}</span></span>
     </div>`;
 
-    if (host) {
+    if (data.runtimeKind === 'kubernetes') {
+      const namespaces = Array.isArray(c.namespaces) ? c.namespaces : [];
+      if (!namespaces.length) {
+        out += '<div class="text-xs text-zinc-500 mb-3">Namespace quota status is unavailable.</div>';
+      }
+      for (const item of namespaces) {
+        const resources = item.resources;
+        out += `<div class="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+          <div class="text-xs font-medium mono text-zinc-700 dark:text-zinc-300 mb-2">${AdminStatus.esc(item.namespace)}</div>`;
+        if (!resources) {
+          out += '<div class="text-xs text-zinc-500">No readable ResourceQuota.</div>';
+        } else {
+          const rows = [
+            ['Pods', resources.pods],
+            ['CPU requests', resources.requestsCpu],
+            ['Memory requests', resources.requestsMemory],
+          ];
+          for (const [label, metric] of rows) {
+            if (!metric) continue;
+            const pct = metric.percent == null ? 0 : metric.percent;
+            const tone = pct >= 90 ? 'red' : pct >= 70 ? 'yellow' : 'green';
+            const headroom = metric.headroomPercent == null
+              ? ''
+              : ` · ${AdminStatus.esc(metric.headroomPercent)}% headroom`;
+            out += meterRow(label, `${AdminStatus.esc(metric.used)} / ${AdminStatus.esc(metric.hard)}${headroom}`, pct, tone);
+          }
+        }
+        out += '</div>';
+      }
+    } else if (host) {
       const memUsed = host.memTotalBytes - host.memFreeBytes;
       const memTone = host.memUsedPct >= 90 ? 'red' : host.memUsedPct >= 75 ? 'yellow' : 'green';
       out += meterRow('Host RAM', `${fmtBytes(memUsed)} / ${fmtBytes(host.memTotalBytes)} (${host.memUsedPct}%)`, host.memUsedPct, memTone);
@@ -158,6 +187,8 @@ const AdminStatus = {
       dead: 'pill-missing',
       missing: 'pill-missing',
       creating: 'pill-creating',
+      restarting: 'pill-creating',
+      unknown: 'pill-stopped',
     };
     const cls = map[state] || 'pill-stopped';
     return `<span class="pill ${cls}"><span class="dot"></span>${AdminStatus.esc(label || state)}</span>`;
@@ -203,7 +234,7 @@ const AdminStatus = {
     }
   },
 
-  renderSummary(s, node) {
+  renderSummary(s, node, runtimeKind) {
     const summaryCard = AdminStatus.summaryCard;
     const fmtDollars = AdminStatus.fmtDollars;
     const prodTone = s.prodMissing > 0 ? 'red' : 'green';
@@ -224,12 +255,17 @@ const AdminStatus = {
     const workerExtras = [];
     if (warmIdle > 0) workerExtras.push(`<span class="text-gray-500 text-xs">+${warmIdle} warm</span>`);
     if (s.workersOrphaned > 0) workerExtras.push(`<span class="text-red-600 dark:text-red-400 text-xs">+${s.workersOrphaned} orphan</span>`);
-    const workerValue = `${inFlight}${workerExtras.length ? ' ' + workerExtras.join(' ') : ''}`;
+    const workerValue = runtimeKind === 'kubernetes'
+      ? `${s.workersReady || 0}/${s.workersTotal || 0}${inFlight > 0 ? ` <span class="text-zinc-500 text-xs">${inFlight} active</span>` : ''}`
+      : `${inFlight}${workerExtras.length ? ' ' + workerExtras.join(' ') : ''}`;
+    const stagingValue = runtimeKind === 'kubernetes'
+      ? `${s.stagingRunning || 0}/${s.stagingTotal || 0}`
+      : `${s.stagingRunning}/${s.stagingCap}`;
 
     const cards = [
       summaryCard('Node', nodeValue, nodeMeta.tone),
       summaryCard('Apps', `${s.prodRunning}/${s.apps}`, prodTone),
-      summaryCard('Staging', `${s.stagingRunning}/${s.stagingCap}`),
+      summaryCard('Staging', stagingValue),
       summaryCard('Workers', workerValue, workerTone),
       summaryCard('Stuck', `${s.stuckSessions}`, stuckTone),
       summaryCard('Prod missing', `${s.prodMissing}`, s.prodMissing > 0 ? 'red' : 'zinc'),
@@ -399,7 +435,7 @@ const AdminStatus = {
           workerLine = `
             <div class="mt-1.5 pl-3 border-l-2 border-indigo-300 dark:border-indigo-800 text-xs">
               <div class="flex items-center gap-2">
-                <span class="pill pill-running"><span class="dot"></span>worker</span>
+                ${statePill(s.worker.state || 'unknown', `worker: ${s.worker.state || 'unknown'}`)}
                 <span class="text-gray-600 dark:text-gray-400">${fmtDuration(s.worker.uptimeSeconds)}${orphanTag}</span>
                 ${s.worker.model ? `<span class="mono text-gray-500">${h(s.worker.model)}</span>` : ''}
               </div>
@@ -660,7 +696,7 @@ const AdminStatus = {
           <!-- Right: System lanes -->
           <div class="space-y-6 min-w-0">
             <section class="admin-only">
-              <h3 class="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-2">Capacity &amp; host</h3>
+              <h3 id="admin-status-capacity-heading" class="text-sm font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-2">Capacity &amp; host</h3>
               <div id="admin-status-capacity" class="${AdminUI.card} p-4 text-sm"></div>
             </section>
 
@@ -733,8 +769,12 @@ const AdminStatus = {
       };
       const version = document.getElementById('admin-status-version');
       if (version) version.textContent = data.version || '';
+      const capacityHeading = document.getElementById('admin-status-capacity-heading');
+      if (capacityHeading) {
+        capacityHeading.textContent = data.runtimeKind === 'kubernetes' ? 'Capacity' : 'Capacity & host';
+      }
       AdminStatus.renderDeployBanner(data.deployProgress);
-      set('admin-status-summary', AdminStatus.renderSummary(data.summary || {}, data.node));
+      set('admin-status-summary', AdminStatus.renderSummary(data.summary || {}, data.node, data.runtimeKind));
       set('admin-status-node', AdminStatus.renderNode(data.node));
       set('admin-status-explorer', AdminStatus.renderExplorer(data.explorer));
       set('admin-status-apps', AdminStatus.renderApps(data.apps || []));
@@ -774,9 +814,9 @@ const AdminStatus = {
   },
 
   // Called by AdminConsole before it swaps this section out, and when the
-  // console itself closes. /api/status is expensive server-side (docker
-  // stats + host probes), so leaving the 5s poll running would keep
-  // paying for a screen nobody is looking at.
+  // console itself closes. /api/status performs runtime inventory calls,
+  // so leaving the 5s poll running would keep paying for a screen nobody
+  // is looking at.
   destroy() {
     clearInterval(AdminStatus._refreshTimer);
     clearInterval(AdminStatus._countdownTimer);
