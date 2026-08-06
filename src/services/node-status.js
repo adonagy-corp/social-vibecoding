@@ -61,6 +61,7 @@ const DEFAULT_NODE_RPC_URL = process.env.NODE_RPC_URL || null;
 // HTTP/HTTPS rule (private IPs go HTTP, public hostnames go HTTPS).
 const EXPLORER_UPSTREAM = process.env.EXPLORER_UPSTREAM || 'testnet-explorer.usernodelabs.org';
 const EXPLORER_UPSTREAM_BASE = process.env.EXPLORER_UPSTREAM_BASE || '/api';
+const EXPLORER_USE_HTTP = process.env.EXPLORER_USE_HTTP === 'true';
 
 // Cadence — fast during boot so the dashboard sees the
 // Connecting → Connected → Syncing → Synced transitions, slow once
@@ -115,7 +116,7 @@ let lastLoggedExplorerStatus = 'unknown';
 
 function explorerBase() {
   const isPrivate = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01]))/.test(EXPLORER_UPSTREAM);
-  const proto = isPrivate ? 'http' : 'https';
+  const proto = EXPLORER_USE_HTTP || isPrivate ? 'http' : 'https';
   return `${proto}://${EXPLORER_UPSTREAM}${EXPLORER_UPSTREAM_BASE}`;
 }
 

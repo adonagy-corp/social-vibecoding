@@ -45,6 +45,7 @@ test('Kubernetes workloads receive the canonical repository and release revision
   assert.match(platform, /name: NODE_RPC_URL, value: \{\{ \.Values\.config\.nodeRpcUrl \| quote \}\}/);
   assert.match(platform, /name: EXPLORER_UPSTREAM, value: \{\{ \.Values\.config\.explorerUpstream \| quote \}\}/);
   assert.match(platform, /name: EXPLORER_UPSTREAM_BASE, value: \{\{ \.Values\.config\.explorerUpstreamBase \| quote \}\}/);
+  assert.match(platform, /name: EXPLORER_USE_HTTP, value: \{\{ \.Values\.config\.explorerUseHttp \| quote \}\}/);
 });
 
 test('platform node RPC egress is restricted to the configured namespace and Pod labels', () => {
@@ -54,6 +55,20 @@ test('platform node RPC egress is restricted to the configured namespace and Pod
   assert.match(platformPolicy, /kubernetes\.io\/metadata\.name/);
   assert.match(platformPolicy, /networkPolicy\.nodeRpc\.podSelector/);
   assert.match(platformPolicy, /networkPolicy\.nodeRpc\.port/);
+  assert.match(platformPolicy, /networkPolicy\.explorer\.enabled/);
+  assert.match(platformPolicy, /networkPolicy\.explorer\.podSelector/);
+  assert.match(platformPolicy, /networkPolicy\.explorer\.port/);
+});
+
+test('all explorer consumers honor the explicit internal HTTP transport', () => {
+  for (const sourcePath of [
+    'server.js',
+    'src/services/node-status.js',
+    'src/services/chain-poller.js',
+    'src/services/genesis-accounts.js',
+  ]) {
+    assert.match(read(sourcePath), /process\.env\.EXPLORER_USE_HTTP === 'true'/, sourcePath);
+  }
 });
 
 test('/api/version uses the canonical configured platform repository', () => {

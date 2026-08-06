@@ -82,6 +82,7 @@ config:
   # numeric addresses use HTTP, matching the platform's existing proxy logic.
   explorerUpstream: testnet-explorer.usernodelabs.org
   explorerUpstreamBase: /api
+  explorerUseHttp: false
   internalUrl: http://social-vibecoding.social-platform.svc.cluster.local:3000
   logLevel: INFO
   workerMemory: 2g
@@ -125,6 +126,11 @@ networkPolicy:
     enabled: false
     namespace: ""
     port: 3000
+    podSelector: {}
+  explorer:
+    enabled: false
+    namespace: ""
+    port: 3080
     podSelector: {}
   # Generated apps and workers call authenticated internal platform APIs.
   internalCallerNamespaces:

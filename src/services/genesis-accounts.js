@@ -4,6 +4,7 @@ const log = require('./logger');
 
 const EXPLORER_UPSTREAM = process.env.EXPLORER_UPSTREAM || 'testnet-explorer.usernodelabs.org';
 const EXPLORER_UPSTREAM_BASE = process.env.EXPLORER_UPSTREAM_BASE || '/api';
+const EXPLORER_USE_HTTP = process.env.EXPLORER_USE_HTTP === 'true';
 
 let genesisAddresses = new Set();
 let loaded = false;
@@ -70,7 +71,7 @@ function httpJson(method, urlStr, body) {
 
 function explorerBase() {
   const isPrivate = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01]))/.test(EXPLORER_UPSTREAM);
-  const proto = isPrivate ? 'http' : 'https';
+  const proto = EXPLORER_USE_HTTP || isPrivate ? 'http' : 'https';
   return `${proto}://${EXPLORER_UPSTREAM}${EXPLORER_UPSTREAM_BASE}`;
 }
 

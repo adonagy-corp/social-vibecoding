@@ -160,9 +160,10 @@ app.use(mcpPreAuthRoutes(config));
 const EXPLORER_UPSTREAM =
   process.env.EXPLORER_UPSTREAM || 'testnet-explorer.usernodelabs.org';
 const EXPLORER_UPSTREAM_BASE = process.env.EXPLORER_UPSTREAM_BASE || '/api';
-const EXPLORER_USE_HTTP = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01]))/.test(
-  EXPLORER_UPSTREAM.replace(/:\d+$/, '')
-);
+const EXPLORER_USE_HTTP = process.env.EXPLORER_USE_HTTP === 'true'
+  || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01]))/.test(
+    EXPLORER_UPSTREAM.replace(/:\d+$/, '')
+  );
 
 app.use('/explorer-api', (req, res) => {
   const transport = EXPLORER_USE_HTTP ? require('http') : require('https');
