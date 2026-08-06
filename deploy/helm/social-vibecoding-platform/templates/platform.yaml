@@ -77,6 +77,8 @@ spec:
             - {name: PLATFORM_INTERNAL_URL, value: {{ .Values.config.internalUrl | quote }}}
             - {name: USERNODE_PLATFORM_REPO, value: {{ .Values.config.platformRepository | quote }}}
             - {name: NODE_RPC_URL, value: {{ .Values.config.nodeRpcUrl | quote }}}
+            - {name: EXPLORER_UPSTREAM, value: {{ .Values.config.explorerUpstream | quote }}}
+            - {name: EXPLORER_UPSTREAM_BASE, value: {{ .Values.config.explorerUpstreamBase | quote }}}
             - {name: LOG_LEVEL, value: {{ .Values.config.logLevel | quote }}}
             - {name: WORKER_MEMORY, value: {{ .Values.config.workerMemory | quote }}}
             - {name: WORKER_CPUS, value: {{ .Values.config.workerCpus | quote }}}

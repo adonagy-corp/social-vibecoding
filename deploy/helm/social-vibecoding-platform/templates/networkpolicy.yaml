@@ -40,6 +40,20 @@ spec:
               {{- include "social-vibecoding-platform.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: postgresql
       ports: [{protocol: TCP, port: 5432}]
+    {{- if .Values.networkPolicy.nodeRpc.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "networkPolicy.nodeRpc.namespace is required when nodeRpc access is enabled" .Values.networkPolicy.nodeRpc.namespace | quote }}
+          {{- with .Values.networkPolicy.nodeRpc.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.nodeRpc.port }}
+    {{- end }}
     - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
     - to: [{ipBlock: {cidr: 0.0.0.0/0}}]
       ports: [{protocol: TCP, port: 443}]

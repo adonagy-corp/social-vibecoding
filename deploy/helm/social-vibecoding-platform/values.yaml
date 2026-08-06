@@ -78,6 +78,10 @@ config:
   domain: social-vibecoding.example.invalid
   platformRepository: https://github.com/replace-me/social-vibecoding
   nodeRpcUrl: http://replace-me.invalid:3000
+  # Explorer host[:port] without a scheme. Public hosts use HTTPS; private
+  # numeric addresses use HTTP, matching the platform's existing proxy logic.
+  explorerUpstream: testnet-explorer.usernodelabs.org
+  explorerUpstreamBase: /api
   internalUrl: http://social-vibecoding.social-platform.svc.cluster.local:3000
   logLevel: INFO
   workerMemory: 2g
@@ -114,6 +118,14 @@ ingress:
 networkPolicy:
   enabled: true
   ciliumApiServerEgress: true
+  # Optional cross-namespace access to the selected UserNode HTTP endpoint.
+  # Keep the Pod selector specific so the platform cannot reach every workload
+  # in the network namespace merely because it needs one node's /status API.
+  nodeRpc:
+    enabled: false
+    namespace: ""
+    port: 3000
+    podSelector: {}
   # Generated apps and workers call authenticated internal platform APIs.
   internalCallerNamespaces:
     - social-apps

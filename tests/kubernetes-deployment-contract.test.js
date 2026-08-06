@@ -42,6 +42,18 @@ test('Kubernetes workloads receive the canonical repository and release revision
   assert.match(migrationJob, /name: GIT_SHA, value: \{\{ \.Values\.release\.sourceRevision \| quote \}\}/);
   assert.match(platform, /name: USERNODE_PLATFORM_REPO, value: \{\{ \.Values\.config\.platformRepository \| quote \}\}/);
   assert.match(platform, /name: GIT_SHA, value: \{\{ \.Values\.release\.sourceRevision \| quote \}\}/);
+  assert.match(platform, /name: NODE_RPC_URL, value: \{\{ \.Values\.config\.nodeRpcUrl \| quote \}\}/);
+  assert.match(platform, /name: EXPLORER_UPSTREAM, value: \{\{ \.Values\.config\.explorerUpstream \| quote \}\}/);
+  assert.match(platform, /name: EXPLORER_UPSTREAM_BASE, value: \{\{ \.Values\.config\.explorerUpstreamBase \| quote \}\}/);
+});
+
+test('platform node RPC egress is restricted to the configured namespace and Pod labels', () => {
+  const policy = read('deploy/helm/social-vibecoding-platform/templates/networkpolicy.yaml');
+  const platformPolicy = policy.split('kind: NetworkPolicy')[2].split('---')[0];
+  assert.match(platformPolicy, /networkPolicy\.nodeRpc\.enabled/);
+  assert.match(platformPolicy, /kubernetes\.io\/metadata\.name/);
+  assert.match(platformPolicy, /networkPolicy\.nodeRpc\.podSelector/);
+  assert.match(platformPolicy, /networkPolicy\.nodeRpc\.port/);
 });
 
 test('/api/version uses the canonical configured platform repository', () => {
