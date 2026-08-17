@@ -124,14 +124,14 @@ const AdminStatus = {
     if (data.runtimeKind === 'kubernetes') {
       const namespaces = Array.isArray(c.namespaces) ? c.namespaces : [];
       if (!namespaces.length) {
-        out += '<div class="text-xs text-zinc-500 mb-3">Namespace quota status is unavailable.</div>';
+        out += '<div class="text-xs text-gray-500 mb-3">Namespace quota status is unavailable.</div>';
       }
       for (const item of namespaces) {
         const resources = item.resources;
-        out += `<div class="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-          <div class="text-xs font-medium mono text-zinc-700 dark:text-zinc-300 mb-2">${AdminStatus.esc(item.namespace)}</div>`;
+        out += `<div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-800">
+          <div class="text-xs font-medium mono text-gray-700 dark:text-gray-300 mb-2">${AdminStatus.esc(item.namespace)}</div>`;
         if (!resources) {
-          out += '<div class="text-xs text-zinc-500">No readable ResourceQuota.</div>';
+          out += '<div class="text-xs text-gray-500">No readable ResourceQuota.</div>';
         } else {
           const rows = [
             ['Pods', resources.pods],
@@ -256,7 +256,7 @@ const AdminStatus = {
     if (warmIdle > 0) workerExtras.push(`<span class="text-gray-500 text-xs">+${warmIdle} warm</span>`);
     if (s.workersOrphaned > 0) workerExtras.push(`<span class="text-red-600 dark:text-red-400 text-xs">+${s.workersOrphaned} orphan</span>`);
     const workerValue = runtimeKind === 'kubernetes'
-      ? `${s.workersReady || 0}/${s.workersTotal || 0}${inFlight > 0 ? ` <span class="text-zinc-500 text-xs">${inFlight} active</span>` : ''}`
+      ? `${s.workersReady || 0}/${s.workersTotal || 0}${inFlight > 0 ? ` <span class="text-gray-500 text-xs">${inFlight} active</span>` : ''}`
       : `${inFlight}${workerExtras.length ? ' ' + workerExtras.join(' ') : ''}`;
     const stagingValue = runtimeKind === 'kubernetes'
       ? `${s.stagingRunning || 0}/${s.stagingTotal || 0}`

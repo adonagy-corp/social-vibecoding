@@ -32,10 +32,24 @@ Resource ordering within the Application is:
 3. Idempotent migration `Sync` hook at wave `-1`.
 4. Platform Deployment, Service and Ingress at wave `0`.
 
-The platform uses `Recreate` because the current process owns background
-sweepers and WebSockets without leader election. This creates a short rollout
-interruption but prevents two platform processes from reconciling the same
-application/session state concurrently.
+Platform upgrades use a Kubernetes-native blue/green equivalent: a
+`RollingUpdate` Deployment creates a new ReplicaSet beside the live one,
+requires two consecutive readiness successes plus `minReadySeconds`, and keeps
+`maxUnavailable: 0`. The stable Service starts routing to the new Pod only
+after it is Ready; Kubernetes removes and terminates the old Pod after the new
+ReplicaSet is Available. Existing connections receive the platform's normal
+pre-stop and SIGTERM drain budget.
+
+Both Pods may serve independent requests during the brief overlap. That is safe
+because `PLATFORM_LEADER_LOCK=1` uses the platform's PostgreSQL advisory-lock
+coordinator: only one Pod runs singleton recovery, sweepers and reconcilers.
+This is intentionally implemented with the built-in Deployment controller;
+the cluster does not need Caddy, Argo Rollouts, or another rollout CRD.
+
+If the candidate never becomes Ready, the Deployment times out without taking
+the old ReplicaSet down. Roll back by restoring the previous OCI chart version
+in the Argo CD source; the same readiness-gated rollout then moves traffic back
+to the previous immutable image set.
 
 PostgreSQL data is held by a retained `openebs-lvm-retain` PVC. Deleting the
 StatefulSet or Argo Application does not delete the underlying volume. Take a

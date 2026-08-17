@@ -33,6 +33,7 @@ function kubernetesWorkerConfig() {
   return {
     workerMemory: WORKER_MEMORY,
     workerCpus: WORKER_CPUS,
+    workerContractVersion: WORKER_BOOTSTRAP_ENV_VERSION,
     kubernetes: {
       workerNamespace: process.env.WORKER_NAMESPACE || 'social-workers',
       workerServiceAccount: process.env.WORKER_SERVICE_ACCOUNT || 'social-worker',
@@ -1347,7 +1348,9 @@ async function ensureWorker(sessionId, {
     // usernode.proxy label and force a re-bootstrap. Cheap — one Docker
     // inspect on the warm-path hot path.
     const labels = usesKubernetesWorkers()
-      ? { 'usernode.proxy': WORKER_BOOTSTRAP_ENV_VERSION }
+      ? { 'usernode.proxy': await kubernetes.getWorkerContractVersion(
+          kubernetesWorkerConfig(), containerName
+        ) }
       : await docker.getContainerLabels(containerName);
     if (labels['usernode.proxy'] !== WORKER_BOOTSTRAP_ENV_VERSION) {
       log.info('worker', 'Evicting stale-label warm container', { containerName });

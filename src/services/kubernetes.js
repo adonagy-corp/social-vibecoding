@@ -313,6 +313,9 @@ async function ensureWorker(config, { sessionId, env }) {
   const pvcName = withSuffix(name, 'state');
   const secretName = withSuffix(name, 'env');
   const resourceLabels = labels({ sessionId, environment: 'worker' });
+  const workerContractLabels = config.workerContractVersion
+    ? { 'social.usernode.io/worker-contract': String(config.workerContractVersion) }
+    : {};
   const selectorLabels = { 'social.usernode.io/runtime-name': name };
   const { core, apps } = getClients();
   try {
@@ -325,14 +328,16 @@ async function ensureWorker(config, { sessionId, env }) {
     stringData: Object.fromEntries(Object.entries(env || {}).map(([key, value]) => [key, String(value)])),
   });
   await upsert(apps, 'readNamespacedDeployment', 'createNamespacedDeployment', 'replaceNamespacedDeployment', namespace, {
-    apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name, namespace, labels: resourceLabels },
+    apiVersion: 'apps/v1', kind: 'Deployment', metadata: {
+      name, namespace, labels: { ...resourceLabels, ...workerContractLabels },
+    },
     spec: {
       replicas: 1,
       selector: { matchLabels: selectorLabels },
       strategy: { type: 'Recreate' },
       template: {
         metadata: {
-          labels: { ...resourceLabels, ...selectorLabels },
+          labels: { ...resourceLabels, ...selectorLabels, ...workerContractLabels },
           annotations: { 'social.usernode.io/env-checksum': envChecksum(env) },
         },
         spec: {
@@ -376,6 +381,19 @@ async function getWorkerStatus(config, runtimeName) {
     return deployment.status?.availableReplicas >= 1 ? 'running' : 'created';
   } catch (err) {
     if (isNotFound(err)) return 'not_found';
+    throw err;
+  }
+}
+
+async function getWorkerContractVersion(config, runtimeName) {
+  try {
+    const deployment = await getClients().apps.readNamespacedDeployment({
+      name: runtimeName,
+      namespace: config.kubernetes.workerNamespace,
+    });
+    return deployment.metadata?.labels?.['social.usernode.io/worker-contract'] || null;
+  } catch (err) {
+    if (isNotFound(err)) return null;
     throw err;
   }
 }
@@ -581,29 +599,69 @@ async function cloneWorkerVolume(config, sourceSessionId, targetSessionId) {
   throw new Error(`Timed out waiting for worker PVC copy Job ${name}`);
 }
 
-async function runCaptureJob(config, { sessionId, env, timeoutMs = 180000 }) {
+async function runCaptureJob(config, {
+  sessionId, env, stdinPayload = null, timeoutMs = 180000,
+}) {
   const cfg = config.kubernetes;
   if (!cfg.captureImage?.includes('@sha256:')) throw new Error('KUBERNETES_CAPTURE_IMAGE must be an immutable digest');
   const namespace = cfg.workerNamespace;
   const name = dnsName(`sv-capture-s${sessionId}-${Date.now().toString(36)}`);
+  const inputSecretName = stdinPayload == null ? null : withSuffix(name, 'input');
+  if (stdinPayload != null && Buffer.byteLength(String(stdinPayload), 'utf8') > 900 * 1024) {
+    throw new Error('Capture stdin payload exceeds the Kubernetes Secret transport limit');
+  }
+  const captureContainer = {
+    name: 'capture', image: cfg.captureImage, imagePullPolicy: 'IfNotPresent',
+    env: Object.entries(env || {}).map(([key, value]) => ({ name: key, value: String(value) })),
+    resources: { requests: { cpu: '250m', memory: '512Mi', 'ephemeral-storage': '1Gi' }, limits: { cpu: '2', memory: '2Gi', 'ephemeral-storage': '4Gi' } },
+    securityContext: containerSecurityContext(),
+  };
+  const podVolumes = [];
+  if (inputSecretName) {
+    captureContainer.command = ['sh', '-c'];
+    captureContainer.args = ['exec node /app/capture.js < /var/run/usernode-capture/tests.json'];
+    captureContainer.volumeMounts = [{
+      name: 'capture-input', mountPath: '/var/run/usernode-capture', readOnly: true,
+    }];
+    podVolumes.push({
+      name: 'capture-input',
+      secret: { secretName: inputSecretName, items: [{ key: 'tests.json', path: 'tests.json' }] },
+    });
+  }
   const body = { apiVersion: 'batch/v1', kind: 'Job', metadata: { name, namespace, labels: labels({ sessionId, environment: 'capture' }) }, spec: {
     backoffLimit: 0, activeDeadlineSeconds: Math.ceil(timeoutMs / 1000), ttlSecondsAfterFinished: 3600,
-    template: { metadata: { labels: labels({ sessionId, environment: 'capture' }) }, spec: { restartPolicy: 'Never', serviceAccountName: cfg.workerServiceAccount, automountServiceAccountToken: false, securityContext: nodePodSecurityContext(), containers: [{ name: 'capture', image: cfg.captureImage, imagePullPolicy: 'IfNotPresent', env: Object.entries(env || {}).map(([key, value]) => ({ name: key, value: String(value) })), resources: { requests: { cpu: '250m', memory: '512Mi', 'ephemeral-storage': '1Gi' }, limits: { cpu: '2', memory: '2Gi', 'ephemeral-storage': '4Gi' } }, securityContext: containerSecurityContext() }] } },
+    template: { metadata: { labels: labels({ sessionId, environment: 'capture' }) }, spec: { restartPolicy: 'Never', serviceAccountName: cfg.workerServiceAccount, automountServiceAccountToken: false, securityContext: nodePodSecurityContext(), containers: [captureContainer], ...(podVolumes.length ? { volumes: podVolumes } : {}) } },
   } };
   const { batch, core } = getClients();
-  await batch.createNamespacedJob({ namespace, body });
-  const deadline = Date.now() + timeoutMs + 15000;
-  while (Date.now() < deadline) {
-    const job = await batch.readNamespacedJob({ name, namespace });
-    if (job.status?.failed) throw new Error(`Capture Job ${name} failed`);
-    if (job.status?.succeeded) {
-      const pods = await core.listNamespacedPod({ namespace, labelSelector: `job-name=${name}` });
-      const pod = pods.items?.[0];
-      return { stdout: pod ? await core.readNamespacedPodLog({ name: pod.metadata.name, namespace, container: 'capture', limitBytes: 64 * 1024 * 1024 }) : '', runtimeName: name };
+  let inputSecretCreated = false;
+  try {
+    if (inputSecretName) {
+      await core.createNamespacedSecret({ namespace, body: {
+        apiVersion: 'v1', kind: 'Secret',
+        metadata: { name: inputSecretName, namespace, labels: labels({ sessionId, environment: 'capture' }) },
+        type: 'Opaque', stringData: { 'tests.json': String(stdinPayload) },
+      } });
+      inputSecretCreated = true;
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await batch.createNamespacedJob({ namespace, body });
+    const deadline = Date.now() + timeoutMs + 15000;
+    while (Date.now() < deadline) {
+      const job = await batch.readNamespacedJob({ name, namespace });
+      if (job.status?.failed) throw new Error(`Capture Job ${name} failed`);
+      if (job.status?.succeeded) {
+        const pods = await core.listNamespacedPod({ namespace, labelSelector: `job-name=${name}` });
+        const pod = pods.items?.[0];
+        return { stdout: pod ? await core.readNamespacedPodLog({ name: pod.metadata.name, namespace, container: 'capture', limitBytes: 64 * 1024 * 1024 }) : '', runtimeName: name };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    throw new Error(`Timed out waiting for capture Job ${name}`);
+  } finally {
+    if (inputSecretCreated) {
+      await deleteIfPresent(core, 'deleteNamespacedSecret', inputSecretName, namespace)
+        .catch(() => {});
+    }
   }
-  throw new Error(`Timed out waiting for capture Job ${name}`);
 }
 
 async function execInWorker(config, runtimeName, command, stdinText = null) {
@@ -629,7 +687,7 @@ module.exports = {
   dnsName, withSuffix, labels, createBuild, deployApplication, getApplicationStatus,
   getApplicationLogs, restartApplication, deleteApplication, deleteBuilds, ensureWorker,
   runCaptureJob, execInWorker, _getClients: getClients,
-  getWorkerStatus, deleteWorker, listWorkers, cloneWorkerVolume,
+  getWorkerStatus, getWorkerContractVersion, deleteWorker, listWorkers, cloneWorkerVolume,
   listStatusResources, listNamespaceCapacity,
   _setClientsForTest: setClientsForTest, _envChecksumForTest: envChecksum,
   _deploymentStateForTest: deploymentState,

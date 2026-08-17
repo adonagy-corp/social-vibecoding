@@ -10,6 +10,7 @@ function notFound() {
 
 function config() {
   return {
+    workerContractVersion: 'v6',
     kubernetes: {
       buildNamespace: 'social-builds', appNamespace: 'social-apps', workerNamespace: 'social-workers',
       buildServiceAccount: 'social-kpack-builder', generatedAppServiceAccount: 'social-generated-app',
@@ -121,6 +122,8 @@ test('worker runtime reconciles a retained PVC, Secret and warm Deployment', asy
   assert.equal(pvc.spec.storageClassName, 'openebs-lvm-retain');
   const deployment = written.find((item) => item.kind === 'Deployment').body;
   assert.equal(deployment.spec.strategy.type, 'Recreate');
+  assert.equal(deployment.metadata.labels['social.usernode.io/worker-contract'], 'v6');
+  assert.equal(deployment.spec.template.metadata.labels['social.usernode.io/worker-contract'], 'v6');
   assert.deepEqual(
     {
       runAsNonRoot: deployment.spec.template.spec.securityContext.runAsNonRoot,
@@ -135,6 +138,17 @@ test('worker runtime reconciles a retained PVC, Secret and warm Deployment', asy
     kubernetes._envChecksumForTest({ WORKER_JWT: 'redacted' })
   );
   assert.equal(deployment.spec.template.spec.volumes[0].persistentVolumeClaim.claimName, result.pvcName);
+});
+
+test('worker contract version is read from the live Kubernetes Deployment', async () => {
+  kubernetes._setClientsForTest({
+    apps: {
+      async readNamespacedDeployment() {
+        return { metadata: { labels: { 'social.usernode.io/worker-contract': 'v6' } } };
+      },
+    },
+  });
+  assert.equal(await kubernetes.getWorkerContractVersion(config(), 'sv-worker-s42'), 'v6');
 });
 
 test('environment checksum is stable by key order and changes with secret values', () => {
@@ -170,6 +184,33 @@ test('capture runtime uses a bounded Job and caps log retrieval', async () => {
   assert.equal(created.body.spec.template.spec.securityContext.fsGroup, 1000);
   assert.equal(logRequest.limitBytes, 64 * 1024 * 1024);
   assert.equal(result.stdout, 'result');
+});
+
+test('capture runtime transports oversized test input through a temporary Secret volume', async () => {
+  let createdJob;
+  let createdSecret;
+  let deletedSecret;
+  kubernetes._setClientsForTest({
+    batch: {
+      async createNamespacedJob(request) { createdJob = request; },
+      async readNamespacedJob() { return { status: { succeeded: 1 } }; },
+    },
+    core: {
+      async createNamespacedSecret(request) { createdSecret = request; },
+      async deleteNamespacedSecret(request) { deletedSecret = request; },
+      async listNamespacedPod() { return { items: [{ metadata: { name: 'capture-pod' } }] }; },
+      async readNamespacedPodLog() { return 'result'; },
+    },
+  });
+  const payload = JSON.stringify([{ url: 'https://preview.example.invalid/' }]);
+  await kubernetes.runCaptureJob(config(), {
+    sessionId: 42, env: { TESTS: '@stdin' }, stdinPayload: payload, timeoutMs: 120000,
+  });
+  assert.equal(createdSecret.body.stringData['tests.json'], payload);
+  const podSpec = createdJob.body.spec.template.spec;
+  assert.match(podSpec.containers[0].args[0], /capture\.js < \/var\/run\/usernode-capture\/tests\.json/);
+  assert.equal(podSpec.volumes[0].secret.secretName, createdSecret.body.metadata.name);
+  assert.equal(deletedSecret.name, createdSecret.body.metadata.name);
 });
 
 test('status inventory normalizes application, preview and worker readiness from Deployments and Pods', async () => {

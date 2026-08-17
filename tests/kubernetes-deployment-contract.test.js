@@ -14,7 +14,18 @@ test('Kubernetes platform image contains PostgreSQL tools but no Docker CLI', ()
 test('Docker keeps boot migrations while Kubernetes can delegate them to a Job', () => {
   const source = read('server.js');
   assert.match(source, /RUN_MIGRATIONS_ON_STARTUP !== 'false'/);
-  assert.match(source, /await migrate\(config\)/);
+  assert.match(source, /await withMigrationLock\(getPool\(config\), \(\) => migrate\(config\)\)/);
+});
+
+test('Kubernetes platform rollout preserves availability and singleton ownership', () => {
+  const platform = read('deploy/helm/social-vibecoding-platform/templates/platform.yaml');
+  assert.match(platform, /type: RollingUpdate/);
+  assert.match(platform, /maxSurge: 1/);
+  assert.match(platform, /maxUnavailable: 0/);
+  assert.match(platform, /minReadySeconds: 10/);
+  assert.match(platform, /successThreshold: 2/);
+  assert.match(platform, /name: PLATFORM_LEADER_LOCK, value: "1"/);
+  assert.doesNotMatch(platform, /type: Recreate/);
 });
 
 test('Kubernetes workflow publishes all three SHA-addressable images', () => {

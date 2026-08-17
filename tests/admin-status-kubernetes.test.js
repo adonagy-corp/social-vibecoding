@@ -17,7 +17,7 @@ test('status uses a runtime-specific inventory provider', () => {
 });
 
 test('Kubernetes capacity renders quota reservations, not invented live usage', () => {
-  const source = read('public/js/admin-status.js');
+  const source = read('frontend/src/features/admin/admin-status.js');
   assert.match(source, /data\.runtimeKind === 'kubernetes'/);
   assert.match(source, /CPU requests/);
   assert.match(source, /Memory requests/);
@@ -31,7 +31,7 @@ test('Kubernetes capacity renders quota reservations, not invented live usage', 
 
 test('Kubernetes stale-preview administration is exposed as an explicit gap', () => {
   const route = read('src/routes/admin.js');
-  const consoleSource = read('public/js/admin-console.js');
+  const consoleSource = read('frontend/src/features/admin/admin-console.js');
   assert.match(route, /available: !staging && runtimeKind === 'docker'/);
   assert.match(route, /unavailableReason: staging \? 'staging' : \(runtimeKind === 'kubernetes' \? 'kubernetes' : null\)/);
   assert.match(consoleSource, /Not yet supported in Kubernetes/);

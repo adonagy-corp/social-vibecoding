@@ -24,9 +24,16 @@ metadata:
 spec:
   replicas: {{ .Values.platform.replicas }}
   revisionHistoryLimit: 5
-  minReadySeconds: 5
+  # Kubernetes' Deployment controller supplies the two rollout colors as
+  # old/new ReplicaSets. The new color must stay ready before it counts as
+  # available, while maxUnavailable=0 keeps the old color serving until then.
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       {{- include "social-vibecoding-platform.selectorLabels" . | nindent 6 }}
@@ -71,6 +78,10 @@ spec:
             - {name: WORKER_RUNTIME, value: kubernetes}
             - {name: CAPTURE_RUNTIME, value: kubernetes}
             - {name: RUN_MIGRATIONS_ON_STARTUP, value: "false"}
+            # During the rollout overlap both old and new platform Pods serve
+            # HTTP, but only the Postgres advisory-lock leader runs singleton
+            # recovery, sweepers and reconcilers.
+            - {name: PLATFORM_LEADER_LOCK, value: "1"}
             - {name: GIT_SHA, value: {{ .Values.release.sourceRevision | quote }}}
             - {name: USERNODE_DOMAIN, value: {{ .Values.config.domain | quote }}}
             - {name: CLI_CANONICAL_ORIGIN, value: {{ printf "https://%s" .Values.config.domain | quote }}}
@@ -97,6 +108,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+            successThreshold: 2
           livenessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 15
