@@ -294,6 +294,23 @@ jobs:
           echo "BASE_ENV_B64=$(base64 -w0 < "$OUT_FILE")" >> "$GITHUB_ENV"
           rm -f "$OUT_FILE"
 
+      # Keep the physical-replication password out of the platform .env:
+      # both platform colors ingest that file wholesale. deploy.sh decodes
+      # this value into a separate mode-0600 runtime env file loaded only by
+      # usernode-db; the host deployer reuses it between workflow runs.
+      - name: Prepare CNPG replication secret
+        env:
+          REPLICATION_PASSWORD: ${{ secrets.SOCIAL_CNPG_REPLICATION_PASSWORD }}
+        run: |
+          if [ -z "$REPLICATION_PASSWORD" ]; then
+            echo "::error::SOCIAL_CNPG_REPLICATION_PASSWORD is required"
+            exit 1
+          fi
+          REPLICATION_PASSWORD_B64=$(printf '%s' "$REPLICATION_PASSWORD" | base64 -w0)
+          echo "::add-mask::$REPLICATION_PASSWORD_B64"
+          echo "CNPG_REPLICATION_PASSWORD_B64=$REPLICATION_PASSWORD_B64" >> "$GITHUB_ENV"
+          unset REPLICATION_PASSWORD_B64
+
       - name: Sync repo to VPS
         uses: easingthemes/ssh-deploy@v5.1.0
         with:
@@ -332,6 +349,9 @@ jobs:
           # script decodes it instead of carrying the interpolations itself
           # (see that step's comment for why it cannot).
           BASE_ENV_B64: ${{ env.BASE_ENV_B64 }}
+          # Base64 transport for the database-only secret. It never enters
+          # the platform .env assembled above.
+          CNPG_REPLICATION_PASSWORD_B64: ${{ env.CNPG_REPLICATION_PASSWORD_B64 }}
           # The sha being deployed. Forwarded rather than interpolated for
           # the same reason — the script must stay expression-free.
           DEPLOY_SHA: ${{ github.sha }}
@@ -349,7 +369,7 @@ jobs:
           # Forward the gating flags into the remote shell — appleboy
           # /ssh-action only exports vars listed here, not the whole
           # job env.
-          envs: NODE_FILES_CHANGED,CADDY_FILES_CHANGED,FORCE_ARCHIVE_REFRESH,GH_PLATFORM_ENV_B64,BASE_ENV_B64,DEPLOY_SHA,SKIP_IF_CURRENT
+          envs: NODE_FILES_CHANGED,CADDY_FILES_CHANGED,FORCE_ARCHIVE_REFRESH,GH_PLATFORM_ENV_B64,BASE_ENV_B64,CNPG_REPLICATION_PASSWORD_B64,DEPLOY_SHA,SKIP_IF_CURRENT
           # Archive fetch can take several minutes on a fresh seed; bump
           # the action's default 10m ceiling so it doesn't kill the deploy
           # mid-tar.
@@ -363,7 +383,8 @@ jobs:
             set -e
             cd /opt/usernode
             export NODE_FILES_CHANGED CADDY_FILES_CHANGED FORCE_ARCHIVE_REFRESH
-            export GH_PLATFORM_ENV_B64 BASE_ENV_B64 DEPLOY_SHA SKIP_IF_CURRENT
+            export GH_PLATFORM_ENV_B64 BASE_ENV_B64 CNPG_REPLICATION_PASSWORD_B64
+            export DEPLOY_SHA SKIP_IF_CURRENT
             bash scripts/deploy.sh
 
       # Always clear the deploy-in-progress flag so the /status banner goes

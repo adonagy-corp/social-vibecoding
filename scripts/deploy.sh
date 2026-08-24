@@ -29,6 +29,10 @@
 #                        last secret-bearing deploy stays authoritative).
 #   GH_PLATFORM_ENV_B64  (optional) base64 of GitHub-sourced platform
 #                        variable lines, appended after the base .env.
+#   CNPG_REPLICATION_PASSWORD_B64
+#                        (optional) base64 of the database-only replication
+#                        password. The workflow sends it; the host deployer
+#                        reuses the protected runtime file from that run.
 #   NODE_FILES_CHANGED   'true' when this deploy touches the sidecar's
 #                        compose definition or archive scripts.
 #   CADDY_FILES_CHANGED  'true' when caddy.Dockerfile changed.
@@ -72,6 +76,11 @@ if ! flock -w 1800 9; then
   echo "::error::Another deploy has held runtime/deploy.lock for 30m; giving up" >&2
   exit 1
 fi
+
+# Install the public half of the cluster's dedicated forwarding-only key on
+# the deploy account. The helper owns exactly one marked authorized_keys line
+# and preserves every other key.
+bash scripts/install-cnpg-tunnel-key.sh
 
 # The sha currently deployed, read from the .env we may be about to
 # overwrite. This is what the post-deploy health probe rolls back to if
@@ -123,6 +132,36 @@ cat > runtime/deploy-status.json <<EOF
 {"deploying":true,"sha":"$DEPLOY_SHA","startedAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
 trap 'echo "{\"deploying\":false}" > runtime/deploy-status.json' EXIT
+
+# ----------------------------------------------------------------------
+# Database-only replication secret. The platform containers consume .env
+# wholesale, so this credential deliberately lives in a separate runtime file
+# loaded only by usernode-db. Workflow runs rotate it atomically; poller runs
+# reuse the existing file and fail closed before changing GIT_SHA if none has
+# ever been installed.
+# ----------------------------------------------------------------------
+CNPG_REPLICATION_ENV="runtime/cnpg-replication.env"
+if [ -n "${CNPG_REPLICATION_PASSWORD_B64:-}" ]; then
+  CNPG_REPLICATION_PASSWORD=$(printf '%s' "$CNPG_REPLICATION_PASSWORD_B64" | base64 -d)
+  if [ -z "$CNPG_REPLICATION_PASSWORD" ] || [[ "$CNPG_REPLICATION_PASSWORD" == *$'\n'* ]] \
+     || [[ "$CNPG_REPLICATION_PASSWORD" == *$'\r'* ]] || [[ "$CNPG_REPLICATION_PASSWORD" == *"'"* ]]; then
+    echo "::error::SOCIAL_CNPG_REPLICATION_PASSWORD is empty or not representable in the database env file" >&2
+    exit 1
+  fi
+  umask 077
+  printf "SOCIAL_CNPG_REPLICATION_PASSWORD='%s'\n" "$CNPG_REPLICATION_PASSWORD" \
+    > "$CNPG_REPLICATION_ENV.tmp"
+  chmod 600 "$CNPG_REPLICATION_ENV.tmp"
+  mv "$CNPG_REPLICATION_ENV.tmp" "$CNPG_REPLICATION_ENV"
+  unset CNPG_REPLICATION_PASSWORD CNPG_REPLICATION_PASSWORD_B64
+  echo "==> Updated database-only CNPG replication credential"
+elif [ ! -s "$CNPG_REPLICATION_ENV" ]; then
+  echo "::error::No CNPG_REPLICATION_PASSWORD_B64 and no existing $CNPG_REPLICATION_ENV; run the secret-bearing Deploy workflow" >&2
+  exit 1
+else
+  chmod 600 "$CNPG_REPLICATION_ENV"
+  echo "==> Reusing existing database-only CNPG replication credential"
+fi
 
 # ----------------------------------------------------------------------
 # .env: rewrite (workflow path) or patch (host-deployer path).
@@ -526,6 +565,57 @@ fi
 # at the right moment.
 # ----------------------------------------------------------------------
 docker compose up -d usernode-db usernode-node usernode-minio acme-dns caddy
+
+# ----------------------------------------------------------------------
+# Provision the least-privilege source role consumed by the external
+# CloudNativePG standby. The password is generated outside this deployment,
+# arrives through the secret-bearing workflow, and exists in the DB container
+# environment only. Nothing here generates, prints, or exports it.
+#
+# This runs after Compose has reconciled usernode-db so the versioned HBA
+# wrapper and loopback-only port are active. Reapplying the same role contract
+# is safe and makes secret rotation a normal workflow_dispatch deploy.
+# ----------------------------------------------------------------------
+echo "==> Waiting for usernode-db before provisioning the replication role"
+DB_READY=0
+for _ in {1..60}; do
+  if docker exec usernode-db pg_isready -U usernode >/dev/null 2>&1; then
+    DB_READY=1
+    break
+  fi
+  sleep 2
+done
+if [ "$DB_READY" -ne 1 ]; then
+  echo "::error::usernode-db did not become ready within 120s; replication role was not provisioned" >&2
+  exit 1
+fi
+
+docker exec -i usernode-db sh -eu <<'PROVISION_REPLICATION_ROLE'
+: "${SOCIAL_CNPG_REPLICATION_PASSWORD:?SOCIAL_CNPG_REPLICATION_PASSWORD is required}"
+
+psql -X -U "${POSTGRES_USER:-usernode}" -d postgres <<'SQL'
+\set ON_ERROR_STOP on
+\getenv replication_password SOCIAL_CNPG_REPLICATION_PASSWORD
+
+SELECT format(
+  'CREATE ROLE %I WITH LOGIN REPLICATION PASSWORD %L',
+  'social_cnpg_replica',
+  :'replication_password'
+)
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_roles WHERE rolname = 'social_cnpg_replica'
+)
+\gexec
+
+SELECT format(
+  'ALTER ROLE %I WITH LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD %L',
+  'social_cnpg_replica',
+  :'replication_password'
+)
+\gexec
+SQL
+PROVISION_REPLICATION_ROLE
+echo "==> PostgreSQL replication role is ready"
 
 # ----------------------------------------------------------------------
 # Zero-downtime cutover (scripts/platform-rollout.sh): boot the idle

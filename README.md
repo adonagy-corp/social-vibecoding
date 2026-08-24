@@ -89,6 +89,9 @@ In the repo's Settings → Secrets and variables → Actions:
   — RSA-2048 pair for app identity tokens, single line with literal
   `\n` (see `.env.example` for the `openssl`/`awk` recipe)
 - `USERNODE_DB_PASSWORD`
+- `SOCIAL_CNPG_REPLICATION_PASSWORD` — database-only credential for the
+  external CloudNativePG standby; keep it synchronized from the Cluster
+  vault rather than generating it during deployment
 - `USERNODE_GITHUB_APP_ID`, `USERNODE_GITHUB_PRIVATE_KEY`
   (single line with literal `\n`), `USERNODE_GITHUB_BOT_TOKEN`
 - `USERNODE_ANTHROPIC_API_KEY` (optional — BYOK covers the rest)
@@ -108,6 +111,10 @@ Steady-state deploys after that are handled by the host-side deployer
 (`scripts/usernode-deployer.sh`, a systemd service on the VPS — see
 SELF-HOSTING.md); the workflow stays as the secret-rotation and manual
 fallback path.
+
+The deploy also prepares a loopback-only PostgreSQL replication source for
+the test cluster. See [CloudNativePG source standby](./docs/cnpg-source-standby.md)
+for the security boundary, secret rotation, and cluster-side handoff.
 
 ### Zero-downtime deploys (blue-green)
 

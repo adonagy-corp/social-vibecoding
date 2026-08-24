@@ -3,6 +3,8 @@ node_modules/
 /public/css/tailwind.css
 /public/shell/assets/shell.js
 .env
+# Host-managed deployment state; in particular, never stage the CNPG secret.
+runtime/cnpg-replication.env*
 *.log
 data/
 .DS_Store

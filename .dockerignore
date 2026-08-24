@@ -3,6 +3,9 @@
 .git
 node_modules
 **/node_modules
+# Host-managed state includes the database-only CNPG credential. Dockerfile
+# uses `COPY . .`, so the entire directory must stay outside the build context.
+runtime
 public/index.html
 public/css/tailwind.css
 public/shell/assets/shell.js

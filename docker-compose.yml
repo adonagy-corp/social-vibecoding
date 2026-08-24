@@ -286,10 +286,23 @@ services:
       - postgres
       - -c
       - max_wal_size=8GB
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    # CloudNativePG reaches this listener only after authenticating to the
+    # host's restricted SSH forward. Never publish PostgreSQL on a public
+    # interface; the platform continues to use usernode-db:5432 internally.
+    ports:
+      - "127.0.0.1:15432:5432"
     networks:
       - usernode-net
     volumes:
       - usernode-db-data:/var/lib/postgresql/data
+      - ./postgres/pg_hba.replication.conf:/etc/postgresql/pg_hba.conf:ro
+    # Kept separate from the platform's .env so the replication credential
+    # reaches only PostgreSQL. deploy.sh creates and preserves this mode-0600
+    # runtime file before any Compose operation.
+    env_file:
+      - ./runtime/cnpg-replication.env
     environment:
       POSTGRES_DB: usernode
       POSTGRES_USER: usernode
